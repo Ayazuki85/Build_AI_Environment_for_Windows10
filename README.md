@@ -12,4 +12,6 @@
 
 5. Pi的安装及skills、MCP、extensions、prompts的配置教学和我的Pi配置以及工作流程的分享
 
+6. 安装最新显卡驱动以及CUDA
 
+7. 借助PDFMathTranslate辅助阅读外文文献
