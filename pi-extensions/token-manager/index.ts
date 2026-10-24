@@ -12,7 +12,7 @@
  */
 
 import { createHmac } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -262,8 +262,11 @@ export function parseWindow(detail: unknown): WindowUsage | undefined {
 	};
 	const limit = num(d.limit);
 	const remaining = num(d.remaining);
-	if (limit === undefined || remaining === undefined) return undefined;
-	const pct = Math.min(100, Math.max(0, ((limit - remaining) / (limit > 0 ? limit : 1)) * 100));
+	const used = num(d.used);
+	// Kimi 在额度耗尽时可能省略 remaining，此时用 used / limit 计算。
+	const consumed = limit !== undefined && remaining !== undefined ? limit - remaining : used;
+	if (limit === undefined || consumed === undefined) return undefined;
+	const pct = Math.min(100, Math.max(0, (consumed / (limit > 0 ? limit : 1)) * 100));
 	let resetsAt: string | undefined;
 	const rt = d.resetTime;
 	if (typeof rt === "string") resetsAt = rt;
@@ -305,6 +308,7 @@ export interface Pool {
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const authPath = join(agentDir, "auth.json");
 const poolPath = join(agentDir, "extensions", "token-manager", "token-manager.keys.json");
+const legacyPoolPath = join(agentDir, "extensions", "kimi-usage", "kimi-usage.keys.json");
 
 // ── 池存储（原子写 0600）────────────────────────────────────
 
@@ -337,6 +341,24 @@ export function savePoolTo(path: string, pool: Pool): void {
 
 const loadPool = (): Pool => loadPoolFrom(poolPath);
 const savePool = (pool: Pool): void => savePoolTo(poolPath, pool);
+
+/**
+ * 旧版 kimi-usage 迁移：新池文件不存在且旧池存在时整体复制。
+ * 返回 true 表示发生了迁移（用于一次性提示用户移除旧扩展）。
+ */
+export function migrateLegacyPool(newPath: string = poolPath, legacyPath: string = legacyPoolPath): boolean {
+	if (existsSync(newPath) || !existsSync(legacyPath)) return false;
+	try {
+		const raw = JSON.parse(readFileSync(legacyPath, "utf-8"));
+		if (raw && Array.isArray(raw.keys)) {
+			savePoolTo(newPath, { keys: raw.keys, activeId: raw.activeId });
+			return true;
+		}
+	} catch {
+		// 旧文件损坏 → 不迁移
+	}
+	return false;
+}
 
 // ── auth.json 凭据读写 ──────────────────────────────────────
 
@@ -623,8 +645,12 @@ export default function (pi: ExtensionAPI): void {
 		return model.provider === ALI_PROVIDER_ID || ALI_BASE_PATTERN.test(model.baseUrl ?? "");
 	}
 
-	/** 首次运行：池为空时把 auth.json 现有 kimi 凭据导入池 */
+	/** 首次运行：迁移旧 kimi-usage 池；仍为空则把 auth.json 现有 kimi 凭据导入池 */
 	function seedImport(): void {
+		if (migrateLegacyPool()) {
+			pool = loadPool();
+			lastCtx?.ui.notify("已从 kimi-usage 迁移 key 池；验证无误后可移除旧扩展目录 ~/.pi/agent/extensions/kimi-usage", "info");
+		}
 		if (pool.keys.length > 0) return;
 		const cred = readAuthCred(KIMI_PROVIDER_ID);
 		if (!cred || !secretOf(cred)) return;
