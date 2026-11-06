@@ -2,14 +2,14 @@
  * zh-for-pi — 中文设置面板 + 中文 footer
  *
  * /设置：以中文查看和修改 pi 设置，读写同一个 ~/.pi/agent/settings.json，
- * 条目与内置 /settings 面板 100% 对齐（34 项 + 3 个子菜单，支持搜索）。
+ * 条目与内置 /settings 面板 100% 对齐（35 项 + 3 个子菜单，支持搜索）。
  * 另含：斜杠命令描述汉化、/快捷键 中文表、中文 footer（含 TPS，见 footer.ts）、
  * 中文启动页眉（logo 下快捷键提示 + onboarding 文案，ctrl+o 可展开，见 header-zh.ts）、
  * bash 工具结果块汉化（耗时/截断警告/展开提示，同名覆盖内置 bash，见 bash-zh.ts）、
  * write 工具调用块汉化（截断提示，同名覆盖内置 write，见 write-zh.ts）、
  * 全屏模式「回到底部」浮动提示汉化（滚离底部时显示 ↓ 跳转到最新消息，见 scroll-indicator-zh.ts）。
  *
- * 对应 pi 版本：1.0.0
+ * 对应 pi 版本：1.5.0
  */
 import {
 	DynamicBorder,

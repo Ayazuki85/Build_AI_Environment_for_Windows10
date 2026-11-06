@@ -1,10 +1,10 @@
 /**
- * items.ts — 34 个设置项定义表（与内置 /settings 面板一一对应）
+ * items.ts — 35 个设置项定义表（与内置 /settings 面板一一对应）
  *
  * 数据驱动：pi 更新增删设置项时只需改动本表。
  * 纯数据 + 纯函数，不 import 任何 pi 包，可用 node --test 直接测试。
  *
- * 对应 pi 版本：1.0.0
+ * 对应 pi 版本：1.5.0
  * 条目顺序 = 内置面板顺序（bundle 提取）：图片/编辑器/终端类紧跟 autocompact。
  * 条件显示：仅 show-images、image-width-cells 依赖终端图片支持（内置行为，
  * spec 表格误标 4 项）；auto-resize-images、block-images 无条件显示。
@@ -118,14 +118,14 @@ export const ITEMS: ItemDef[] = [
 	tog("auto-resize-images", "自动缩放图片", "大图缩至 2000x2000 以内以提升模型兼容性", ["images", "autoResize"], true),
 	tog("block-images", "屏蔽图片", "禁止将图片发送给 LLM 提供商", ["images", "blockImages"], false),
 	tog("skill-commands", "技能命令", "将技能注册为 /skill:name 命令", ["enableSkillCommands"], true),
-	tog("show-hardware-cursor", "显示硬件光标", "显示终端光标（同时保持 IME 定位）", ["showHardwareCursor"], false),
+	tog("show-hardware-cursor", "显示硬件光标", "使用终端原生光标替代 pi 绘制的光标", ["showHardwareCursor"], false),
 	sel("editor-padding", "编辑器内边距", "输入编辑器的水平内边距（0-3）", ["editorPaddingX"], 0, [
 		["0", 0],
 		["1", 1],
 		["2", 2],
 		["3", 3],
 	]),
-	sel("output-padding", "输出内边距", "用户消息、助手消息和思考块的水平内边距", ["outputPad"], 1, [
+	sel("output-padding", "输出内边距", "消息、工具输出和命令输出的水平内边距", ["outputPad"], 1, [
 		["0", 0],
 		["1", 1],
 	]),
@@ -153,6 +153,11 @@ export const ITEMS: ItemDef[] = [
 		["websocket", "websocket"],
 		["websocket-cached", "websocket-cached"],
 		["自动 (auto)", "auto"],
+	]),
+	sel("share-destination", "会话分享目标", "/share 上传会话的去处（auto 在已认证时优先 Radius，否则 GitHub Gist）", ["sessionShareDestination"], "auto", [
+		["自动 (auto)", "auto"],
+		["gist", "gist"],
+		["radius", "radius"],
 	]),
 	{
 		id: "http-idle-timeout",

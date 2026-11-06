@@ -27,7 +27,18 @@
  *   检查前不应影响 shell 选择，也避免不可信仓库注入 shellPath）
  * - 仅在 TUI 模式注册覆盖（print/rpc 无渲染需求，不动内置工具）
  *
- * 对应 pi 版本：1.0.0
+ * 对应 pi 版本：1.5.0
+ * 1.5.0 同步：stripAnsi 接受紧跟真实 CSI 引导符的 <、=、> 私有前缀，
+ * 完整剥离 ESC[<35;59;1M 等序列，同时保留 ESC= / ESC> 后的普通文本。
+ * 1.4.0 同步：渲染逻辑无变更（renderers/bash.js 的 BASH_PREVIEW_LINES=5、
+ * 尾注剥除、Spacer(1)+VisualLinePreview 预览、截断警告两分支、formatShellCall
+ * 占位，与 render-utils.js 的 durationMs 优先 Elapsed/Took、setInterval(1000)，均同 1.3.0）。
+ * 1.3.0 同步：renderCall/renderResult/rebuildBashResultRenderComponent 逻辑未变；
+ * Elapsed/Took 计时与 setInterval(1000) 驱动已抽至 dist/core/tools/render-utils.js
+ * 的 startToolTimer/toolTimerText（语义与本文件实现一致，仅位置变化）。
+ * 1.1.0 同步：耗时行新增最终结果的 durationMs 优先分支（context.durationMs，
+ * reload 后仍在）；收起态预览随内置改为 Spacer(1) + VisualLinePreview 结构
+ * （该组件未公开导出，此处为同构复刻）。
  */
 
 import {
@@ -42,7 +53,7 @@ import {
 	type Theme,
 	type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { formatKeyTextLower } from "./header-zh.ts";
@@ -73,6 +84,8 @@ interface ZhRenderContext {
 	readonly showImages: boolean;
 	readonly lastComponent: Component | undefined;
 	readonly state: ZhBashRenderState;
+	/** 最终结果记录的执行耗时（1.1.0 新增；进行中/旧结果为 undefined） */
+	readonly durationMs: number | undefined;
 	invalidate(): void;
 }
 
@@ -80,12 +93,13 @@ type ZhBashResult = AgentToolResult<BashToolDetails | undefined>;
 
 // —— 内置 render-utils 的本地化复刻（stripAnsi / sanitizeBinaryOutput 未公开导出）——
 
-// 派生自 ansi-regex（MIT，Sindre Sorhus）——与 dist/utils/ansi.js 同一实现
+// 派生自 ansi-regex（MIT，Sindre Sorhus）——与 1.5.0 的 dist/utils/ansi.js 同一实现
 function ansiRegex(): RegExp {
 	const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
 	const osc = `(?:\\u001B\\][\\s\\S]*?${ST})`;
+	// 私有前缀 <、=、> 仅在真实 CSI 引导符后接受；裸 ESC= / ESC> 不吞后续文本。
 	const csi =
-		"[\\u001B\\u009B][[\\]()#;?]*(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]";
+		"(?:(?:\\u001B\\[|\\u009B)[<=>]|[\\u001B\\u009B][[\\]()#;?]*)(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]";
 	return new RegExp(`${osc}|${csi}`, "g");
 }
 const ANSI_PATTERN = ansiRegex();
@@ -142,14 +156,14 @@ function formatDurationZh(ms: number): string {
 
 // —— 结果组件（与内置 BashResultRenderComponent 同构，含预览渲染缓存）——
 
+/** 与内置 VisualLinePreview 的缓存同构（visual-truncate.js，未公开导出） */
 interface PreviewCache {
 	cachedWidth: number | undefined;
 	cachedLines: string[] | undefined;
-	cachedSkipped: number | undefined;
 }
 
 class ZhBashResultComponent extends Container {
-	cache: PreviewCache = { cachedWidth: undefined, cachedLines: undefined, cachedSkipped: undefined };
+	cache: PreviewCache = { cachedWidth: undefined, cachedLines: undefined };
 }
 
 /** 复刻内置 rebuildBashResultRenderComponent，四处文案汉化 */
@@ -161,6 +175,7 @@ function rebuildResultComponent(
 	expandKey: string,
 	startedAt: number | undefined,
 	endedAt: number | undefined,
+	durationMs: number | undefined,
 ): void {
 	const cache = component.cache;
 	component.clear();
@@ -185,28 +200,30 @@ function rebuildResultComponent(
 		if (options.expanded) {
 			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
 		} else {
+			// 与内置 1.1.0 同构：Spacer(1) + VisualLinePreview（缓存按宽度计算一次；
+			// 有隐藏行时首行是展开提示，keep: "end" 保留尾部）
+			component.addChild(new Spacer(1));
 			component.addChild({
 				render: (width: number) => {
 					if (cache.cachedLines === undefined || cache.cachedWidth !== width) {
 						const preview = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
-						cache.cachedLines = preview.visualLines;
-						cache.cachedSkipped = preview.skippedCount;
+						if (preview.skippedCount > 0) {
+							// 原文 `... (${skipped} earlier lines, ${keyHint("app.tools.expand", "to expand")})`
+							const hint =
+								theme.fg("muted", `...（上方还有 ${preview.skippedCount} 行，`) +
+								theme.fg("dim", expandKey) +
+								theme.fg("muted", " 展开）");
+							cache.cachedLines = [truncateToWidth(hint, width, "..."), ...preview.visualLines];
+						} else {
+							cache.cachedLines = preview.visualLines;
+						}
 						cache.cachedWidth = width;
 					}
-					if (cache.cachedSkipped && cache.cachedSkipped > 0) {
-						// 原文 `... (${skipped} earlier lines, ${keyHint("app.tools.expand", "to expand")})`
-						const hint =
-							theme.fg("muted", `...（上方还有 ${cache.cachedSkipped} 行，`) +
-							theme.fg("dim", expandKey) +
-							theme.fg("muted", " 展开）");
-						return ["", truncateToWidth(hint, width, "..."), ...(cache.cachedLines ?? [])];
-					}
-					return ["", ...(cache.cachedLines ?? [])];
+					return cache.cachedLines ?? [];
 				},
 				invalidate: () => {
 					cache.cachedWidth = undefined;
 					cache.cachedLines = undefined;
-					cache.cachedSkipped = undefined;
 				},
 			});
 		}
@@ -229,7 +246,12 @@ function rebuildResultComponent(
 		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join("；")}]`)}`, 0, 0));
 	}
 
-	if (startedAt !== undefined) {
+	// 最终结果优先用记录的 durationMs（单调、reload 后仍在）；渲染器自身计时
+	// 仅作进行中与旧结果的兜底（1.1.0 新增的第一分支，与内置一致）
+	if (!options.isPartial && durationMs !== undefined) {
+		// 原文 `Took ${formatDuration(durationMs)}`
+		component.addChild(new Text(`\n${theme.fg("muted", `耗时 ${formatDurationZh(durationMs)}`)}`, 0, 0));
+	} else if (startedAt !== undefined) {
 		// 原文 options.isPartial ? "Elapsed" : "Took"
 		const label = options.isPartial ? "已耗时" : "耗时";
 		const endTime = endedAt ?? Date.now();
@@ -285,7 +307,7 @@ function renderResultZh(
 		context.lastComponent instanceof ZhBashResultComponent
 			? context.lastComponent
 			: new ZhBashResultComponent();
-	rebuildResultComponent(component, result, options, theme, expandKey, state.startedAt, state.endedAt);
+	rebuildResultComponent(component, result, options, theme, expandKey, state.startedAt, state.endedAt, context.durationMs);
 	component.invalidate();
 	return component;
 }

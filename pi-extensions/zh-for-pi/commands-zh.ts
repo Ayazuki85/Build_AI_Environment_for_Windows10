@@ -5,12 +5,12 @@
  * 表值不含 argumentHint（<...>）与来源标记（[...]），前缀由 localizeDescription 自动保留。
  * 补全项隐藏功能已拆分为独立插件 hidden-commands（见 ~/.pi/agent/extensions/hidden-commands）。
  *
- * 对应 pi 版本：1.0.0（BUILTIN_SLASH_COMMANDS，dist/core/slash-commands.js）
+ * 对应 pi 版本：1.5.0（BUILTIN_SLASH_COMMANDS，dist/core/slash-commands.js）
  */
 import type { AutocompleteProviderFactory } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 
-/** 内置斜杠命令中文描述（键 = 命令名；右侧注释为 pi 1.0.0 英文原文） */
+/** 内置斜杠命令中文描述（键 = 命令名；右侧注释为 pi 1.5.0 英文原文） */
 export const ZH_COMMAND_DESCRIPTIONS: Record<string, string> = {
 	settings: "打开设置菜单", // Open settings menu
 	model: "选择模型（打开选择器界面）", // Select model (opens selector UI)
@@ -18,8 +18,8 @@ export const ZH_COMMAND_DESCRIPTIONS: Record<string, string> = {
 	thinking: "设置思考级别", // Set thinking level
 	"scoped-models": "启用/禁用 Ctrl+P 循环切换的模型", // Enable/disable models for Ctrl+P cycling
 	export: "导出会话（默认 HTML，或指定路径：.html/.jsonl）", // Export session (HTML default, or specify path: .html/.jsonl)
-	import: "从 JSONL 文件导入并恢复会话", // Import and resume a session from a JSONL file
-	share: "将会话分享为私密 GitHub Gist", // Share session as a secret GitHub gist
+	import: "导入 JSONL 会话，保留其 ID 和工作目录", // Import a JSONL session, preserving its ID and working directory
+	share: "通过 Radius artifact 或 GitHub Gist 分享会话", // Share session via a Radius artifact or a GitHub gist
 	bug: "向 Pi 开发者报告 bug", // Report a bug to the Pi developers
 	copy: "复制最后一条助手消息到剪贴板", // Copy last agent message to clipboard
 	name: "设置会话显示名称", // Set session display name
@@ -33,7 +33,7 @@ export const ZH_COMMAND_DESCRIPTIONS: Record<string, string> = {
 	logout: "移除提供商认证", // Remove provider authentication
 	new: "开始新会话", // Start a new session
 	compact: "手动压缩会话上下文", // Manually compact the session context
-	resume: "恢复其他会话", // Resume a different session
+	resume: "恢复另一个会话", // Resume another session
 	reload: "重新加载键位绑定、扩展、技能、提示模板、主题和上下文文件", // Reload keybindings, extensions, skills, prompts, themes, and context files
 	quit: "退出 pi", // Quit pi（APP_NAME 为动态值，默认 "pi"）
 };

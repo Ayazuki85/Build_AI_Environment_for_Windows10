@@ -31,7 +31,11 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 **2. Dispatch code reviewer subagent:**
 
-Dispatch a `general-purpose` subagent, filling the template at [code-reviewer.md](code-reviewer.md)
+Dispatch a locally registered `reviewer` subagent, filling the template at [code-reviewer.md](code-reviewer.md).
+
+- Use `reviewer` for code review in this environment; it is the dedicated read-only code-review agent.
+- If `reviewer` is unavailable, check the actual available agent names and choose a registered agent capable of read-only review (for example, `worker` with explicit read-only instructions).
+- Never invent an agent name. Do not dispatch `general-purpose` unless it is actually registered in the current environment.
 
 **Placeholders:**
 - `{DESCRIPTION}` - Brief summary of what you built

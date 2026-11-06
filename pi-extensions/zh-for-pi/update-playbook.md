@@ -64,9 +64,10 @@
 
 ## 第 4.6 步：审计 bash 渲染文案（→ bash-zh.ts）
 
-1. 读 `R/core/tools/bash.js`，定位 `rebuildBashResultRenderComponent`（渲染逻辑模板）
-   与同文件内的 `renderCall`/`renderResult`（state 计时管理）。找不到就
-   `grep -rln '"Elapsed"' R --include=*.js | head` 定位。
+1. 读 `R/core/tools/renderers/bash.js`，定位 `rebuildBashResultRenderComponent`（渲染逻辑模板）
+   与 `createShellRenderers` 返回的 `renderCall`/`renderResult`；计时辅助位于
+   `R/core/tools/render-utils.js`。找不到就
+   `grep -rln 'createShellRenderers' R/core/tools --include=*.js | head` 定位。
 2. 与 `EXT/bash-zh.ts` 的 `rebuildResultComponent`/`renderCallZh`/`renderResultZh`
    逐段 diff（逻辑必须随内置同步，文案保持中文）：
    - 预览行数常量 `BASH_PREVIEW_LINES`（当前 5）
@@ -76,9 +77,23 @@
    - `Elapsed`/`Took` 耗时行条件与位置
    - `formatShellCall` 的 `(timeout Ns)` 后缀与空命令 `"..."` / 无效参数占位
    - `renderResult` 的 setInterval(1000) 驱动与 `endedAt ??=` 收尾
+   - `R/utils/ansi.js` 的 CSI 私有前缀处理：`ESC[<...`、`ESC[>...` 等应完整剥离，
+     裸 `ESC=` / `ESC>` 后的普通文本不得被吞掉
 3. 内置若改了渲染逻辑：同步改 bash-zh.ts 的对应实现，中文文案不动。
 
-## 第 4.7 步：审计全屏回到底部提示（→ scroll-indicator-zh.ts）
+## 第 4.7 步：审计 write 渲染文案（→ write-zh.ts）
+
+1. 读 `R/core/tools/renderers/write.js` 与 `EXT/write-zh.ts`。本地是薄文案适配层，
+   路径、高亮、主题/语法数量失效和结果渲染均应直接沿用内置实现，不要复制这些逻辑。
+2. 核对 `collapsedWriteHint()`：CR 归一化、尾随空行、收起 10 行、展开全部行，
+   剩余行数/总行数须与内置一致；无效 content 的判定须与内置 `str()` 一致。
+3. 核对 `translateWriteCallText()` 的精确英文模板（含 `keyHint(..., "to expand")` 和 ANSI
+   分段）。文案变化时只更新翻译匹配；未匹配应安全回退英文，不能误改代码正文。
+4. 确认内置 `renderCall` 仍同步通过 `Text.setText()` 写入文本。本地包装必须无 await、
+   在 finally 恢复原型，并原样返回内置组件，使 `context.lastComponent` 和缓存保持有效。
+   若上游改为异步或不再经过 `Text.setText()`，需重新设计适配机制，不要复刻内部缓存。
+
+## 第 4.8 步：审计全屏回到底部提示（→ scroll-indicator-zh.ts）
 
 1. 在 `R/modes/interactive/tui-renderer.js` 的 `createInteractiveTui` fullscreen 分支找
    `scrollToEndIndicator` 模板。找不到就 `grep -rln "Jump to latest" R/modes --include=*.js | head`。
@@ -95,7 +110,7 @@
    `scrollToEndIndicator` 从实例属性改为其他注入方式，需重审补丁机制
    （文件头注释有完整说明）。
 
-## 第 4.8 步：审计 /mcp 管理器文案（→ mcp-zh.ts）
+## 第 4.9 步：审计 /mcp 管理器文案（→ mcp-zh.ts）
 
 1. 读 `R/extensions/mcp/index.js` 与 `R/extensions/mcp/ui.js`。找不到就
    `grep -rln "Nothing to show." R --include=*.js | head` 定位（运行时实际加载的是
@@ -136,8 +151,9 @@
 - `EXT/hotkeys-zh.ts` 头部注释（若第 4 步定位到了新模板文件，来源路径一并更新）
 - `EXT/header-zh.ts` 头部注释（若第 4.5 步定位到了新模板文件，来源路径一并更新）
 - `EXT/bash-zh.ts` 头部注释（若第 4.6 步定位到了新模板文件，来源路径一并更新）
-- `EXT/scroll-indicator-zh.ts` 头部注释（若第 4.7 步定位到了新模板文件，来源路径一并更新）
-- `EXT/mcp-zh.ts` 头部注释（若第 4.8 步定位到了新来源文件，来源路径一并更新）
+- `EXT/write-zh.ts` 头部注释（若第 4.7 步定位到了新模板文件，来源路径一并更新）
+- `EXT/scroll-indicator-zh.ts` 头部注释（若第 4.8 步定位到了新模板文件，来源路径一并更新）
+- `EXT/mcp-zh.ts` 头部注释（若第 4.9 步定位到了新来源文件，来源路径一并更新）
 - `EXT/index.ts` 头部注释
 - `EXT/README.md`：版本号行、「N 个条目 + 3 个子菜单」、结构表 items.ts 行的「N 项定义表」
   （N = 更新后 ITEMS 实际条数；命令数/快捷键行数若有变也同步 README 相关数字）
@@ -147,7 +163,8 @@
 1. 对每个修改过的 .ts 文件调用 lsp_diagnostics，必须全部无错误
 2. 计数核对：ITEMS 条数 == 内置设置条目总数；ZH_COMMAND_DESCRIPTIONS 键数 == 内置命令数；
    EXPANDED_ROWS 行数 == 内置 expandedInstructions 条数；COMPACT_ROWS 条数 == compactInstructions 条数；
-   BASH_PREVIEW_LINES == 内置 bash.js 同名常量
+   BASH_PREVIEW_LINES == 内置 renderers/bash.js 同名常量；bash ANSI 私有前缀用例通过；
+   write 行数/文案匹配、代码正文保护、原型恢复及内置组件 identity 回归用例通过
 3. 向用户输出变更摘要：新增 / 变更 / 删除分别列了哪些条目
 4. 提醒用户 `/reload` 或重启 pi 生效
 

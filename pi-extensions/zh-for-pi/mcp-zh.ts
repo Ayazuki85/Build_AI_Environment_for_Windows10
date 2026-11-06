@@ -37,13 +37,27 @@
  * - 非 TUI 模式的 `pi mcp` CLI 输出（cli.js）不在范围
  * - 要恢复内置英文：删除 index.ts 中 installMcpZhFeature(pi) 一行并 /reload
  *
- * 对应 pi 版本：1.0.0（文案来源：dist/extensions/mcp/index.js 的
+ * 对应 pi 版本：1.5.0（文案来源：dist/extensions/mcp/index.js 的
  * serversMenu/serverMenu/showTools/chooseExposure/runAction/formatStatus/
  * loginCommand 与 dist/extensions/mcp/ui.js 的 McpManagerView；打包位置可用
  * `grep -ln "Nothing to show." R/bundle/chunks/*.js` 复核）
+ * 1.0.3 同步：新增项目覆盖操作项（Enable/Disable in this project、details 的
+ * project override 行、列表行 "global, project override" 第三段）；redirectUrl
+ * 页随内置改用 AuthUrlComponent 结构（链接行 + 「点击打开 • 键位 复制」提示行，
+ * app.message.copy 复制 URL）——内置组件未导出且用全局 theme 单例，此处以捕获的
+ * theme 复刻中文版（ZhAuthUrlComponent）。
+ * 1.1.0 同步：内置移除 Reconnecting…/Disconnecting… 两条状态页文案（重连/禁用
+ * 改走 runInBackground，不再开状态页），对应条目从 ZH_EXACT 删除。
+ * 1.2.0 同步：describeState 的已连接+资源形态由「connected · N tools · M resources」
+ * （带资源计数）改为「connected · N tools · resources」（仅布尔 hasResources），
+ * ZH_STATE_PATTERNS 首条同步更新。
+ * 1.5.0 同步：OAuth 默认客户端注册方式变化不涉及可见菜单；McpManagerView、
+ * showMcpManager→ctx.ui.custom 与 redirectUrl 结构保持不变，既有翻译继续适用。
+ * 1.4.0 同步：文案与机制均无变更（菜单/状态/通知/redirectUrl 全部命中既有翻译表；
+ * showMcpManager→ctx.ui.custom→McpManagerView 与 runner.js 共享 uiContext 包装不变）。
  */
 
-import { DynamicBorder, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, DynamicBorder, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Spacer, Text, hyperlink, type Component, type Keybinding } from "@earendil-works/pi-tui";
 import { formatKeyTextLower } from "./header-zh.ts";
 
@@ -54,12 +68,14 @@ import { formatKeyTextLower } from "./header-zh.ts";
 /** 操作项 label 专用字典（服务器名/工具名不在其中，原样保留） */
 const ZH_LABELS: ReadonlyMap<string, string> = new Map([
 	["Enable", "启用"],
+	["Enable in this project", "在本项目中启用"],
 	["Sign in", "登录"],
 	["Tools", "工具"],
 	["Reconnect", "重新连接"],
 	["Sign out", "退出登录"],
 	["Exposure", "暴露方式"],
 	["Disable", "禁用"],
+	["Disable in this project", "在本项目中禁用"],
 ]);
 
 /** 固定文案精确匹配（整串或逐行） */
@@ -90,8 +106,6 @@ const ZH_EXACT: ReadonlyMap<string, string> = new Map([
 	// 状态页
 	["Contacting the authorization server…", "正在联系授权服务器…"],
 	["Connecting…", "正在连接…"],
-	["Reconnecting…", "正在重新连接…"],
-	["Disconnecting…", "正在断开连接…"],
 	// 通知与消息
 	["Sign-in cancelled.", "已取消登录。"],
 	["Usage: /mcp, /mcp login [server], /mcp logout [server], /mcp reconnect [server]", "用法：/mcp、/mcp login [服务器]、/mcp logout [服务器]、/mcp reconnect [服务器]"],
@@ -112,20 +126,22 @@ const ZH_STATE_EXACT: ReadonlyMap<string, string> = new Map([
 	["connected", "已连接"],
 	["disconnected", "已断开"],
 	["disconnected, reconnects on next call", "已断开，下次调用时重新连接"],
+	["connecting", "连接中…"], // formatStatus 用 connection.state 原值（无省略号）
 ]);
 
 const ZH_STATE_PATTERNS: ReadonlyArray<readonly [RegExp, (m: RegExpMatchArray) => string]> = [
-	[/^connected · (\d+) tools? · (\d+) resources?$/, (m) => `已连接 · ${m[1]} 个工具 · ${m[2]} 个资源`],
+	[/^connected · (\d+) tools? · resources$/, (m) => `已连接 · ${m[1]} 个工具 · 含资源`],
 	[/^connected · (\d+) tools?$/, (m) => `已连接 · ${m[1]} 个工具`],
 	[/^failed: ([\s\S]*)$/, (m) => `失败：${m[1]}`],
 ];
 
-/** scope 词映射（路径原样保留） */
+/** scope 词映射（路径原样保留）；"global, project override" 是列表行第三段的组合形态 */
 const ZH_SCOPE: ReadonlyMap<string, string> = new Map([
 	["global", "全局"],
 	["project", "项目"],
 	["extension", "扩展"],
 	["config", "配置"],
+	["global, project override", "全局，项目覆盖"],
 ]);
 
 function translateState(s: string): string {
@@ -171,12 +187,17 @@ const ZH_PATTERNS: ReadonlyArray<readonly [RegExp, (m: RegExpMatchArray) => stri
 	// formatStatus 行（notify 整体输出时逐行命中）
 	[/^(.+): needs sign-in, run \/mcp login (.+) \((\w+)\)$/, (m) => `${m[1]}：需要登录，请运行 /mcp login ${m[2]}（${m[3]}）`],
 	[
-		/^(.+): (connected|disabled|starting|disconnected)(?:, (\d+) tools)? \((\w+)\)$/,
+		/^(.+): (connected|disabled|starting|disconnected|connecting|failed)(?:, (\d+) tools)? \((\w+)\)$/,
 		(m) => `${m[1]}：${translateState(m[2])}${m[3] ? `，${m[3]} 个工具` : ""}（${m[4]}）`,
 	],
 	[/^config error: (.+)$/, (m) => `配置错误：${m[1]}`],
 	[/^"(.+)" registered by (.+) is overridden by "(.+)" in (.+)$/, (m) => `"${m[1]}"（由 ${m[2]} 注册）被 ${m[4]} 中的 "${m[3]}" 覆盖`],
 	[/^overridden: (.+)$/, (m) => `被覆盖：${translateText(m[1])}`],
+	// formatStatus 行：disconnected 的完整形态须在通用行之前
+	[
+		/^(.+): disconnected, reconnects on next call \((\w+)\)$/,
+		(m) => `${m[1]}：已断开，下次调用时重新连接（${m[2]}）`,
+	],
 	// 「以下 MCP 服务器需要注意」的服务器行（保留前导缩进）
 	[/^(\s*)(\S.*): (failed: .+|needs sign-in)$/, (m) => `${m[1]}${m[2]}：${translateState(m[3])}`],
 	// 菜单标题（放在上面的消息模式之后，避免吞掉整句消息）
@@ -187,8 +208,15 @@ const ZH_PATTERNS: ReadonlyArray<readonly [RegExp, (m: RegExpMatchArray) => stri
 	// 操作项描述
 	[/^(\d+) offered$/, (m) => `提供 ${m[1]} 个`],
 	[/^saved to the (\w+) mcp\.json$/, (m) => `已保存到${scopeZh(m[1])} mcp.json`],
-	// details 行（State 仅限已知状态词，避免误伤工具描述）
-	[/^State: (connected|disabled|starting|connecting…|needs sign-in|failed|disconnected)$/, (m) => `状态：${translateState(m[1])}`],
+	// details 行（State 仅在 translateState 认得时才翻译，避免误伤以 "State: " 开头的工具描述）
+	[/^project override: (.+)$/, (m) => `项目覆盖：${m[1]}`],
+	[
+		/^State: (.+)$/,
+		(m) => {
+			const t = translateState(m[1]);
+			return t === m[1] ? m[0] : `状态：${t}`;
+		},
+	],
 	[/^(global|project|extension|config): (.+)$/, (m) => `${scopeZh(m[1])}：${m[2]}`],
 	[/^Exposure (\w+): (.+)$/, (m) => `暴露方式 ${m[1]}：${translateText(m[2])}`],
 	[/^Applies to this session; the server is registered by (.+)\.$/, (m) => `仅对本次会话生效；该服务器由 ${m[1]} 注册。`],
@@ -269,6 +297,7 @@ function translateMenu(menu: McpMenu): McpMenu {
 
 /** McpManagerView 的最小结构（dist/extensions/mcp/ui.js；字段在编译产物中为公开） */
 interface McpManagerViewLike extends Component {
+	tui: { requestRender(): void };
 	theme: Theme;
 	keybindings: KeybindingsManager;
 	menu(build: () => McpMenu, subscribe?: (listener: () => void) => () => void): Promise<string | undefined>;
@@ -295,8 +324,51 @@ function zhKeyHint(theme: Theme, kb: KeybindingsManager, binding: string, label:
 }
 
 /**
+ * 复刻内置 AuthUrlComponent（dist/modes/interactive/components/auth-url.js）：
+ * URL 链接行 + 提示行（「Ctrl+点击打开 • 键位 复制」），app.message.copy 触发 copy()。
+ * 内置组件未从包根导出且内部用全局 theme 单例（jiti 双实例问题），故以捕获的
+ * theme/keybindings 复刻中文版。
+ */
+class ZhAuthUrlComponent extends Container {
+	private readonly hint: Text;
+
+	constructor(
+		private readonly tui: { requestRender(): void },
+		private readonly url: string,
+		private readonly theme: Theme,
+		keybindings: KeybindingsManager,
+	) {
+		super();
+		this.addChild(new Text(theme.fg("accent", hyperlink(url, url)), 1, 0));
+		this.hint = new Text("", 1, 0);
+		this.addChild(this.hint);
+		// 原文 keyHint("app.message.copy", "to copy")
+		this.setHint(zhKeyHint(theme, keybindings, "app.message.copy", "复制"));
+	}
+
+	setHint(suffix: string): void {
+		// 原文 process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open"
+		const clickHint = process.platform === "darwin" ? "Cmd+点击打开" : "Ctrl+点击打开";
+		this.hint.setText(
+			`${this.theme.fg("dim", hyperlink(clickHint, this.url))} ${this.theme.fg("dim", "•")} ${suffix}`,
+		);
+		this.tui.requestRender();
+	}
+
+	async copy(): Promise<void> {
+		try {
+			await copyToClipboard(this.url);
+			// 原文 "Copied URL to clipboard"
+			this.setHint(this.theme.fg("success", "已复制 URL 到剪贴板"));
+		} catch (error) {
+			this.setHint(this.theme.fg("error", error instanceof Error ? error.message : String(error)));
+		}
+	}
+}
+
+/**
  * redirectUrl 的中文整页重写（逻辑复刻 dist/extensions/mcp/ui.js：
- * confirm 提交非空输入、cancel/abort 返回 undefined、Ctrl/Cmd+点击提示）。
+ * confirm 提交非空输入、cancel/abort 返回 undefined、app.message.copy 复制 URL）。
  */
 function zhRedirectUrl(
 	view: McpManagerViewLike,
@@ -321,16 +393,17 @@ function zhRedirectUrl(
 		const theme = view.theme;
 		const keybindings = view.keybindings;
 		const input = new Input();
-		const clickHint = process.platform === "darwin" ? "Cmd+点击打开" : "Ctrl+点击打开";
+		const link = new ZhAuthUrlComponent(view.tui, authorizationUrl, theme, keybindings);
 		const accentBorder = () => new DynamicBorder((text: string) => theme.fg("accent", text));
 		const container = new Container();
 		container.addChild(accentBorder());
 		container.addChild(new Text(theme.fg("accent", theme.bold(translateText(title))), 1, 0));
 		container.addChild(new Spacer(1));
+		// 原文 "Approve access in your browser. If it did not open, visit:"
 		container.addChild(new Text(theme.fg("muted", "请在浏览器中完成授权。如果浏览器没有打开，请访问："), 1, 0));
-		container.addChild(new Text(theme.fg("accent", hyperlink(authorizationUrl, authorizationUrl)), 1, 0));
-		container.addChild(new Text(theme.fg("dim", hyperlink(clickHint, authorizationUrl)), 1, 0));
+		container.addChild(link);
 		container.addChild(new Spacer(1));
+		// 原文 "If the browser runs on another machine, paste the URL it was redirected to:"
 		container.addChild(new Text(theme.fg("muted", "如果浏览器运行在另一台机器上，请粘贴它被重定向到的 URL："), 1, 0));
 		container.addChild(input);
 		container.addChild(new Spacer(1));
@@ -352,6 +425,11 @@ function zhRedirectUrl(
 				}
 				if (keybindings.matches(data, "tui.select.cancel")) {
 					finish(undefined);
+					return;
+				}
+				// 与内置一致：app.message.copy 复制授权 URL（长 URL 折行后难以整体选中）
+				if (keybindings.matches(data, "app.message.copy")) {
+					void link.copy();
 					return;
 				}
 				input.handleInput(data);

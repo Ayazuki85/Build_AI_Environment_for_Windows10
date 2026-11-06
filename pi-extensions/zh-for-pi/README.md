@@ -2,10 +2,10 @@
 
 ## 功能一：/settings的汉化
 
-`/设置` 命令打开全中文设置面板，功能与内置 `/settings` 100% 对齐（34 个条目 + 3 个子菜单，支持顶部搜索），
+`/设置` 命令打开全中文设置面板，功能与内置 `/settings` 100% 对齐（35 个条目 + 3 个子菜单，支持顶部搜索），
 读写同一个 `~/.pi/agent/settings.json`。
 
-**对应 pi 版本：1.0.0**（条目定义数据驱动，pi 增删设置项时只需改 `items.ts` 一行）。
+**对应 pi 版本：1.5.0**（条目定义数据驱动，pi 增删设置项时只需改 `items.ts` 一行）。
 
 ## 功能二：斜杠命令描述汉化
 
@@ -71,7 +71,7 @@ TPS 功能合并自 pi-token-speed（MIT，作者 Gabriel Sanhueza）。
 1:1 对齐。收起态：
 
 ```
-pi v1.0.0
+pi v1.5.0
 Esc 中断 · ctrl+c/ctrl+d 清空/退出 · / 命令 · ! bash · ctrl+o 更多
 
 Pi 能讲解自己的功能并查阅自己的文档，直接问它怎么用 Pi 或怎么给 Pi 写拓展。
@@ -92,7 +92,7 @@ ctrl+o 展开为 19 行完整快捷键清单（中断生成 / 清空输入框 / 
 - logo 主名硬编码为 `pi`（内置 APP_NAME 未导出；仅品牌 fork 会不同）。
 - 要恢复内置页眉：删除 `index.ts` 中 `installHeaderFeature(pi)` 一行并重启。
 
-## 功能六：bash 工具结果块汉化
+## 功能六：bash / write 工具块汉化
 
 bash 工具调用的显示块整体汉化（执行逻辑与内置 100% 同源）：
 
@@ -120,6 +120,11 @@ $ npm uninstall pi-questions (超时 60秒)
 - 仅在 TUI 模式注册覆盖（print/rpc 模式保持内置）
 - 要恢复内置英文渲染：删除 `index.ts` 中 `installBashZhFeature(pi)` 一行并 /reload
 
+write 工具调用块的收起提示也已汉化，例如「还有 N 行，共 M 行，Ctrl+O 展开」。
+该功能是直接包裹内置渲染器的薄文案适配层，路径缩写、OSC 8 链接、流式/完整高亮缓存及
+主题和语法数量失效均沿用内置实现。要恢复内置英文渲染，删除 `index.ts` 中
+`installWriteZhFeature(pi)` 一行并 /reload。
+
 ## 功能七：/update-zh-for-pi 一键汉化更新
 
 pi 升级后在 TUI 输入 `/update-zh-for-pi`：命令读取随附的 `update-playbook.md`
@@ -128,21 +133,22 @@ pi 升级后在 TUI 输入 `/update-zh-for-pi`：命令读取随附的 `update-p
 命令本身不含提取逻辑；dist 内部结构变化时，agent 按手册中的搜索兜底策略自适应。
 
 手册覆盖：`items.ts`（设置项）、`commands-zh.ts`（命令描述）、`hotkeys-zh.ts`
-（快捷键表）、`header-zh.ts`（启动页眉行）、`bash-zh.ts`（bash 渲染文案）、
-`scroll-indicator-zh.ts`（全屏回到底部提示）、各文件版本注释与 README 计数。
+（快捷键表）、`header-zh.ts`（启动页眉行）、`bash-zh.ts` / `write-zh.ts`（工具渲染）、
+`scroll-indicator-zh.ts`（全屏回到底部提示）、`mcp-zh.ts`（MCP 管理器）、
+各文件版本注释与 README 计数。
 `footer.ts` / `tps-*.ts` 为定制代码，不在更新范围。
 
 ## 功能八：全屏模式「回到底部」提示汉化
 
 全屏模式（`tuiMode: fullscreen`）下向上滚动聊天记录、视口不再跟随最新消息时，
-内置会在记录区底部居中叠加英文提示 `↓ Jump to latest message · End`。本功能
+内置会在记录区底部居中叠加英文提示 `↓ Jump to latest message · Ctrl+End`。本功能
 将其替换为中文版：
 
 ```
-↓ 跳转到最新消息 · End
+↓ 跳转到最新消息 · Ctrl+End
 ```
 
-键位名跟随真实生效键位（`tui.altScreen.bottom`，默认 End；改过 `keybindings.json`
+键位名跟随真实生效键位（`tui.altScreen.bottom`，默认 Ctrl+End；改过 `keybindings.json`
 后显示自定义键位），点击提示或按该键回到底部后自动消失，与内置行为一致。
 
 机制：`session_start` 时经 `ctx.ui.custom()` 捕获真实渲染器（Proxy 的 set /
@@ -162,7 +168,8 @@ getPrototypeOf 陷阱落到 pi 自己的实例上），对 pi-tui `TuiAltScreen`
 ## 功能九：/mcp 管理器汉化
 
 `/mcp` 管理器全部页面汉化：服务器列表（状态行如 `已连接 · 16 个工具 · direct · 全局`）、
-单个服务器页（启用/登录/工具/重新连接/退出登录/暴露方式/禁用 + 命令/来源/状态三行详情）、
+单个服务器页（启用/登录/工具/重新连接/退出登录/暴露方式/禁用，及项目级启用/禁用
++ 命令/来源/状态详情行）、
 工具列表页、暴露方式选择页、OAuth 登录页与状态页；`/mcp login|logout|reconnect` 的
 通知与选择/输入框同步翻译。翻译表为「精确字典 + 有序正则」两层，未命中的文案
 （如 pi 新版新增）原样显示英文，不会报错。
@@ -189,12 +196,12 @@ getPrototypeOf 陷阱落到 pi 自己的实例上），对 pi-tui `TuiAltScreen`
 | 文件               | 职责                                         |
 | ---------------- | ------------------------------------------ |
 | `settings-io.ts` | settings.json 读写（容错加载、原子写、`.bak` 备份）       |
-| `items.ts`       | 34 项定义表（中文标签/描述、选项映射、默认值、字段路径）             |
+| `items.ts`       | 35 项定义表（中文标签/描述、选项映射、默认值、字段路径）             |
 | `commands-zh.ts` | 斜杠命令翻译表、描述替换纯函数、autocomplete provider 包装器 |
 | `hotkeys-zh.ts`  | 快捷键表行定义（3 区 34 行中文翻译）、键位格式化、Markdown 构建纯函数 |
 | `header-zh.ts`   | 启动页眉行定义（展开 19 行 / 收起 5 条 + onboarding 文案）、构建纯函数、ZhHeader 组件 |
 | `bash-zh.ts`     | bash 工具同名覆盖：中文 renderCall/renderResult（耗时、截断警告、展开提示） |
-| `write-zh.ts`    | write 工具同名覆盖：中文 renderCall（截断提示）                    |
+| `write-zh.ts`    | write 中文提示适配层：复用内置组件、路径渲染与高亮缓存         |
 | `scroll-indicator-zh.ts` | 全屏「回到底部」提示汉化（TuiAltScreen scrollToEndIndicator 补丁） |
 | `mcp-zh.ts`      | /mcp 管理器汉化（共享 ctx.ui 包装 + McpManagerView 菜单翻译 + OAuth 页重写） |
 | `footer.ts`      | 中文 footer 渲染、编辑器边框、TPS 事件接线、`/tps` 注册      |

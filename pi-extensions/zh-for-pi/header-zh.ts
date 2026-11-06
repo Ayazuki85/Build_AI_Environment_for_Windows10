@@ -1,8 +1,9 @@
 /**
  * header-zh — 启动页眉汉化（logo 下方的快捷键提示 + onboarding 文案）
  *
- * 复刻内置 builtInHeader（interactive-mode.js init() 中的 ExpandableText）：
- * 收起态 = logo + 单行紧凑提示 + onboarding 两行；展开态（ctrl+o）= logo +
+ * 复刻内置 builtInHeader（interactive-mode.js init() 中的 BuiltInHeader）：
+ * 收起态 = logo（1.1.0 起为双色 half-block logo，Apple Terminal 回退文字 Pi）
+ * + 单行紧凑提示 + compactOnboarding + onboarding；展开态（ctrl+o）= logo +
  * 完整快捷键清单 + onboarding。组件实现 setExpanded，pi 的 ctrl+o
  * （app.tools.expand → setToolsExpanded → activeHeader.setExpanded）会同步调用。
  *
@@ -11,12 +12,23 @@
  * （同步 done 捕获、零闪烁，同 /快捷键），改过 keybindings.json 后显示自定义键位。
  * 安静启动（quietStartup: true）时内置页眉为空 Text，本功能跳过安装。
  *
- * 对应 pi 版本：1.0.0（模板见 dist/modes/interactive/interactive-mode.js init()，
+ * 对应 pi 版本：1.5.0（模板见 dist/modes/interactive/interactive-mode.js init()，
+ * logo 见 dist/modes/interactive/components/pi-logo.js，
  * 键位辅助见 dist/modes/interactive/components/keybinding-hints.js）
+ * 已知取舍：内置 logo 的点击彩蛋（playPiLogo3d）未公开导出，中文页眉不响应点击。
  */
 
 import { getAgentDir, VERSION, type ExtensionAPI, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
-import { Container, Text, type Keybinding } from "@earendil-works/pi-tui";
+import {
+	backgroundAnsi,
+	Container,
+	foregroundAnsi,
+	isAppleTerminalSession,
+	rgbColor,
+	Text,
+	type Keybinding,
+	type TerminalColorMode,
+} from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { getByPath, loadSettings } from "./settings-io.ts";
 
@@ -36,7 +48,7 @@ export interface HintRow {
 	zh: string;
 }
 
-/** 展开态完整清单（pi 1.0.0 英文原文 19 条，见 init() expandedInstructions） */
+/** 展开态完整清单（pi 1.5.0 英文原文 19 条，见 init() expandedInstructions） */
 export const EXPANDED_ROWS: HintRow[] = [
 	{ segments: [{ id: "app.interrupt" }], join: "/", zh: "中断生成" }, // to interrupt
 	{ segments: [{ id: "app.clear" }], join: "/", zh: "清空输入框" }, // to clear
@@ -66,7 +78,7 @@ export const EXPANDED_ROWS: HintRow[] = [
 	{ segments: [{ raw: "拖入文件" }], join: "/", zh: "添加为附件" },
 ];
 
-/** 收起态紧凑提示（pi 1.0.0 英文原文 5 条，见 init() compactInstructions，以 muted " · " 相连） */
+/** 收起态紧凑提示（pi 1.5.0 英文原文 5 条，见 init() compactInstructions，以 muted " · " 相连） */
 export const COMPACT_ROWS: HintRow[] = [
 	{ segments: [{ id: "app.interrupt" }], join: "/", zh: "中断" }, // interrupt
 	// 原文 `${keyText("app.clear")}/${keyText("app.exit")}` clear/exit
@@ -76,10 +88,8 @@ export const COMPACT_ROWS: HintRow[] = [
 	{ segments: [{ id: "app.tools.expand" }], join: "/", zh: "更多" }, // more
 ];
 
-/**
- * 收起态第二行：原文 `Press ${keyText("app.tools.expand")} to show full startup help${showDetails ? " and loaded resources" : ""}.`
- * （showDetails = 内置 shouldShowStartupDetails()：quietStartup 为 true/"header" 时隐藏 details）
- */
+/** 收起态第二行：原文 `Press ${keyText("app.tools.expand")} to show full startup help${showDetails ? " and loaded resources" : ""}.`
+ *  （showDetails = shouldShowStartupDetails：quietStartup 为 false 或 --verbose 时含「与已加载资源」） */
 export const COMPACT_ONBOARDING_ZH = (expandKey: string, showDetails: boolean): string =>
 	`按 ${expandKey} 显示完整启动帮助${showDetails ? "与已加载资源" : ""}。`;
 
@@ -98,11 +108,11 @@ export interface HeaderDeps {
 	theme: HeaderTheme;
 	/** 真实生效键位查询（来自 ctx.ui.custom() 注入的 KeybindingsManager） */
 	getKeys: (id: string) => string[];
-	/** logo 主名（内置为未导出的 APP_NAME = pkg.piConfig?.name || "pi"） */
-	appName: string;
-	version: string;
-	/** 内置 shouldShowStartupDetails()：quietStartup 为 true/"header" 时为 false */
+	/** 终端色彩模式（logo 的 ANSI 真彩色按此编码；构建时从 theme.getColorMode() 捕获） */
+	colorMode: TerminalColorMode;
+	/** 收起态第二行是否含「与已加载资源」（内置 shouldShowStartupDetails；--verbose 无法检测，见安装处注释） */
 	showDetails: boolean;
+	version: string;
 }
 
 /** 复刻内置 formatKeyText（不 capitalize；仅 darwin 上 alt→option），/ 与 + 分隔符都保留。
@@ -136,11 +146,36 @@ function hintText(theme: HeaderTheme, row: HintRow, getKeys: (id: string) => str
 	return theme.fg("dim", keys) + theme.fg("muted", ` ${row.zh}`);
 }
 
-function logoText(deps: HeaderDeps): string {
-	return deps.theme.bold(deps.theme.fg("accent", deps.appName)) + deps.theme.fg("dim", ` v${deps.version}`);
+// —— logo（复刻 dist/modes/interactive/components/pi-logo.js；品牌色跨主题固定）——
+
+const LOGO_CORAL = rgbColor(228, 138, 122);
+const LOGO_BLUE = rgbColor(79, 142, 179);
+const LOGO_YELLOW = rgbColor(234, 182, 93);
+const ANSI_RESET = "\x1b[0m";
+
+/** pi logo：4 格宽 2 行高的 half-block 图形（上行末格为空，补齐同宽） */
+function piLogoLines(colorMode: TerminalColorMode): [string, string] {
+	const fg = (color: ReturnType<typeof rgbColor>) => foregroundAnsi(color, colorMode);
+	const top = `${fg(LOGO_CORAL)}${backgroundAnsi(LOGO_BLUE, colorMode)}▀${ANSI_RESET}${fg(LOGO_CORAL)}▀█${ANSI_RESET} `;
+	const bottom = `${fg(LOGO_BLUE)}█▀${ANSI_RESET} ${fg(LOGO_YELLOW)}█${ANSI_RESET}`;
+	return [top, bottom];
 }
 
-/** 收起态全文：`${logo}\n${compact}\n${compactOnboarding}\n\n${onboarding}`（与内置一致） */
+/** 文字版 logo（Apple Terminal 画 half-block 会错位，内置同样回退） */
+function piWordmark(colorMode: TerminalColorMode): string {
+	return `${foregroundAnsi(LOGO_CORAL, colorMode)}P${ANSI_RESET}${foregroundAnsi(LOGO_YELLOW, colorMode)}i${ANSI_RESET}`;
+}
+
+/** 复刻内置 withLogo：logo 首行带版本号，次行带 hints 的首行（hints 为多行时其余行自然落到下面） */
+function withLogo(deps: HeaderDeps, hints: string): string {
+	if (isAppleTerminalSession()) {
+		return `${piWordmark(deps.colorMode)} ${deps.theme.fg("dim", `v${deps.version}`)}\n${hints}`;
+	}
+	const [top, bottom] = piLogoLines(deps.colorMode);
+	return `${top} ${deps.theme.fg("dim", `v${deps.version}`)}\n${bottom} ${hints}`;
+}
+
+/** 收起态全文：`${withLogo(compact)}\n${compactOnboarding}\n\n${onboarding}`（与内置一致） */
 export function buildCollapsedHeaderText(deps: HeaderDeps): string {
 	const compact = COMPACT_ROWS.map((r) => hintText(deps.theme, r, deps.getKeys)).join(
 		deps.theme.fg("muted", " · "),
@@ -150,14 +185,14 @@ export function buildCollapsedHeaderText(deps: HeaderDeps): string {
 		COMPACT_ONBOARDING_ZH(keyTextFor("app.tools.expand", deps.getKeys), deps.showDetails),
 	);
 	const onboarding = deps.theme.fg("dim", ONBOARDING_ZH);
-	return `${logoText(deps)}\n${compact}\n${compactOnboarding}\n\n${onboarding}`;
+	return `${withLogo(deps, compact)}\n${compactOnboarding}\n\n${onboarding}`;
 }
 
-/** 展开态全文：`${logo}\n${expanded}\n\n${onboarding}`（与内置一致） */
+/** 展开态全文：`${withLogo(expanded)}\n\n${onboarding}`（与内置一致） */
 export function buildExpandedHeaderText(deps: HeaderDeps): string {
 	const expanded = EXPANDED_ROWS.map((r) => hintText(deps.theme, r, deps.getKeys)).join("\n");
 	const onboarding = deps.theme.fg("dim", ONBOARDING_ZH);
-	return `${logoText(deps)}\n${expanded}\n\n${onboarding}`;
+	return `${withLogo(deps, expanded)}\n\n${onboarding}`;
 }
 
 // —— 组件与安装 ——
@@ -190,8 +225,8 @@ export function installHeaderFeature(pi: ExtensionAPI): void {
 		const settings = loadSettings(join(getAgentDir(), "settings.json")).settings;
 		const quietStartup = getByPath(settings, ["quietStartup"]);
 		if (quietStartup === true) return;
-		// 内置 shouldShowStartupDetails()：quietStartup === false 才显示 details
-		// （--verbose 恒 true 但扩展无法检测，与既有注释一致取设置值）
+		// 内置 shouldShowStartupDetails = verbose || quietStartup === false；
+		// verbose 扩展无法检测，按 quietStartup !== "header" 近似（verbose 用户按下展开即可看到资源区）
 		const showDetails = quietStartup !== "header";
 		// 真实 KeybindingsManager（含 keybindings.json 覆盖与平台差异）：
 		// custom() 工厂同步 done 捕获，零闪烁（同 /快捷键 的取键位方式）
@@ -204,9 +239,9 @@ export function installHeaderFeature(pi: ExtensionAPI): void {
 				new ZhHeader({
 					theme,
 					getKeys: (id) => kb.getKeys(id as Keybinding),
-					appName: "pi", // 内置 APP_NAME 未导出；仅品牌 fork（pkg.piConfig.name）会不同
-					version: VERSION,
+					colorMode: theme.getColorMode(),
 					showDetails,
+					version: VERSION,
 				}),
 		);
 	});
