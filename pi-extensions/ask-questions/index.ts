@@ -500,6 +500,13 @@ async function askQuestionsInTui(
 		}
 
 		return {
+			get focused() {
+				return editor.focused;
+			},
+			set focused(value: boolean) {
+				editor.focused = value;
+				cache = undefined;
+			},
 			render(width: number) {
 				const rows = tui.terminal.rows;
 				if (!cache || cache.width !== width || cache.rows !== rows) {
