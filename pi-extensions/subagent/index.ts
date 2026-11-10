@@ -23,9 +23,10 @@
  *    thinking whenever an agent pinned a model.)
  * 3. Usage line renders "model:thinking" via formatModelWithThinking().
  *
- * Sync after pi upgrades: diff against the shipped example at
- *   /home/zk/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/examples/extensions/subagent/index.ts
+ * Sync after pi upgrades: locate the global npm root with `npm root -g`, diff against
+ *   <npm-root>/@earendil-works/pi-coding-agent/examples/extensions/subagent/index.ts
  * and re-apply the blocks above.
+ * 1.5.0 sync: use formatReadLineRange() for numeric-string/null read ranges.
  */
 
 import { spawn } from "node:child_process";
@@ -38,6 +39,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
+	formatReadLineRange,
 	getAgentDir,
 	getMarkdownTheme,
 	withFileMutationQueue,
@@ -103,13 +105,10 @@ function formatToolCall(
 		case "read": {
 			const rawPath = (args.file_path || args.path || "...") as string;
 			const filePath = shortenPath(rawPath);
-			const offset = args.offset as number | undefined;
-			const limit = args.limit as number | undefined;
+			const lineRange = formatReadLineRange(args.offset, args.limit);
 			let text = themeFg("accent", filePath);
-			if (offset !== undefined || limit !== undefined) {
-				const startLine = offset ?? 1;
-				const endLine = limit !== undefined ? startLine + limit - 1 : "";
-				text += themeFg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
+			if (lineRange) {
+				text += themeFg("warning", lineRange);
 			}
 			return themeFg("muted", "read ") + text;
 		}

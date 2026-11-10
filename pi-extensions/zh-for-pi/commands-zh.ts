@@ -5,12 +5,12 @@
  * 表值不含 argumentHint（<...>）与来源标记（[...]），前缀由 localizeDescription 自动保留。
  * 补全项隐藏功能已拆分为独立插件 hidden-commands（见 ~/.pi/agent/extensions/hidden-commands）。
  *
- * 对应 pi 版本：1.5.0（BUILTIN_SLASH_COMMANDS，dist/core/slash-commands.js）
+ * 对应 pi 版本：1.5.1（BUILTIN_SLASH_COMMANDS，dist/core/slash-commands.js）
  */
 import type { AutocompleteProviderFactory } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 
-/** 内置斜杠命令中文描述（键 = 命令名；右侧注释为 pi 1.5.0 英文原文） */
+/** 内置斜杠命令中文描述（键 = 命令名；右侧注释为 pi 1.5.1 英文原文） */
 export const ZH_COMMAND_DESCRIPTIONS: Record<string, string> = {
 	settings: "打开设置菜单", // Open settings menu
 	model: "选择模型（打开选择器界面）", // Select model (opens selector UI)

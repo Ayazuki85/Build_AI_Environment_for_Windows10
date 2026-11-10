@@ -12,7 +12,7 @@
  * （同步 done 捕获、零闪烁，同 /快捷键），改过 keybindings.json 后显示自定义键位。
  * 安静启动（quietStartup: true）时内置页眉为空 Text，本功能跳过安装。
  *
- * 对应 pi 版本：1.5.0（模板见 dist/modes/interactive/interactive-mode.js init()，
+ * 对应 pi 版本：1.5.1（模板见 dist/modes/interactive/interactive-mode.js init()，
  * logo 见 dist/modes/interactive/components/pi-logo.js，
  * 键位辅助见 dist/modes/interactive/components/keybinding-hints.js）
  * 已知取舍：内置 logo 的点击彩蛋（playPiLogo3d）未公开导出，中文页眉不响应点击。
@@ -48,7 +48,7 @@ export interface HintRow {
 	zh: string;
 }
 
-/** 展开态完整清单（pi 1.5.0 英文原文 19 条，见 init() expandedInstructions） */
+/** 展开态完整清单（pi 1.5.1 英文原文 19 条，见 init() expandedInstructions） */
 export const EXPANDED_ROWS: HintRow[] = [
 	{ segments: [{ id: "app.interrupt" }], join: "/", zh: "中断生成" }, // to interrupt
 	{ segments: [{ id: "app.clear" }], join: "/", zh: "清空输入框" }, // to clear
@@ -78,7 +78,7 @@ export const EXPANDED_ROWS: HintRow[] = [
 	{ segments: [{ raw: "拖入文件" }], join: "/", zh: "添加为附件" },
 ];
 
-/** 收起态紧凑提示（pi 1.5.0 英文原文 5 条，见 init() compactInstructions，以 muted " · " 相连） */
+/** 收起态紧凑提示（pi 1.5.1 英文原文 5 条，见 init() compactInstructions，以 muted " · " 相连） */
 export const COMPACT_ROWS: HintRow[] = [
 	{ segments: [{ id: "app.interrupt" }], join: "/", zh: "中断" }, // interrupt
 	// 原文 `${keyText("app.clear")}/${keyText("app.exit")}` clear/exit

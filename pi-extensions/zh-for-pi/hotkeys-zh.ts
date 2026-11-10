@@ -5,7 +5,7 @@
  * 键位列由调用方注入 getKeys（来自 ctx.ui.custom() 注入的真实 KeybindingsManager，
  * 含用户 keybindings.json 覆盖与平台差异）；本文件不做任何 pi 运行时 import，可独立测试。
  *
- * 对应 pi 版本：1.5.0（handleHotkeysCommand 模板，dist/modes/interactive/interactive-mode.js）
+ * 对应 pi 版本：1.5.1（handleHotkeysCommand 模板，dist/modes/interactive/interactive-mode.js）
  */
 
 /** 一行定义：ids 为键位 id（tui.editor.* / tui.input.* / app.*），同行多 id 合并显示；

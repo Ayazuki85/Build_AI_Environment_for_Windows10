@@ -15,8 +15,8 @@
  *      custom/notify/select/input 即覆盖内置 /mcp。
  *   2. 内置 showMcpManager 经 ctx.ui.custom(factory) 创建视图，factory 返回
  *      McpManagerView 实例 → 包装 custom 后调用原 factory，按类名/方法集识别
- *      该实例并包装：menu() 的 build 结果过 translateMenu（每次重渲染自动生效）、
- *      status() 两参数过 translateText、redirectUrl() 整页中文重写。
+ *      该实例并包装：menu() 的 build 结果过 translateMenu，setContent() 覆盖首个菜单
+ *      已启动后的订阅重渲染，status() 参数过 translateText、redirectUrl() 整页中文重写。
  *   3. redirectUrl 重写用公开导出的 DynamicBorder（显式传 color，规避 jiti 双实例
  *      的全局 theme 问题）与复刻的 keyHint（header-zh 的 formatKeyTextLower +
  *      捕获的 live KeybindingsManager，原因同 header-zh.ts 第 131 行注释）。
@@ -32,12 +32,11 @@
  * - 暴露方式名（codemode/deferred/direct/hidden）是写进 mcp.json 的配置词汇，保留原文
  * - MCP 服务器提供的工具名/工具描述不翻译；服务器若恰好叫 Enable/Tools 等字典词，
  *   其名称在列表中会显示为中文（概率极低，可接受）
- * - 视图构造时的初始 `Loading…` 帧在首个 menu 渲染前一瞬即过，不处理
  * - `/mcp login <Tab>` 补全项里的状态描述走 autocomplete provider，不在本功能范围
  * - 非 TUI 模式的 `pi mcp` CLI 输出（cli.js）不在范围
  * - 要恢复内置英文：删除 index.ts 中 installMcpZhFeature(pi) 一行并 /reload
  *
- * 对应 pi 版本：1.5.0（文案来源：dist/extensions/mcp/index.js 的
+ * 对应 pi 版本：1.5.1（文案来源：dist/extensions/mcp/index.js 的
  * serversMenu/serverMenu/showTools/chooseExposure/runAction/formatStatus/
  * loginCommand 与 dist/extensions/mcp/ui.js 的 McpManagerView；打包位置可用
  * `grep -ln "Nothing to show." R/bundle/chunks/*.js` 复核）
@@ -88,7 +87,8 @@ const ZH_EXACT: ReadonlyMap<string, string> = new Map([
 	["back", "返回"],
 	["select", "选择"],
 	["save", "保存"],
-	// 空态
+	// 加载与空态
+	["Loading…", "正在加载…"],
 	["Nothing to show.", "暂无内容。"],
 	["This server is no longer configured.", "该服务器已不再配置。"],
 	["The server offers no tools.", "该服务器未提供任何工具。"],
@@ -190,6 +190,7 @@ const ZH_PATTERNS: ReadonlyArray<readonly [RegExp, (m: RegExpMatchArray) => stri
 		/^(.+): (connected|disabled|starting|disconnected|connecting|failed)(?:, (\d+) tools)? \((\w+)\)$/,
 		(m) => `${m[1]}：${translateState(m[2])}${m[3] ? `，${m[3]} 个工具` : ""}（${m[4]}）`,
 	],
+	[/^(\s*)config: (.+)$/, (m) => `${m[1]}配置：${m[2]}`],
 	[/^config error: (.+)$/, (m) => `配置错误：${m[1]}`],
 	[/^"(.+)" registered by (.+) is overridden by "(.+)" in (.+)$/, (m) => `"${m[1]}"（由 ${m[2]} 注册）被 ${m[4]} 中的 "${m[3]}" 覆盖`],
 	[/^overridden: (.+)$/, (m) => `被覆盖：${translateText(m[1])}`],
@@ -273,6 +274,10 @@ interface McpMenu {
 	cancelLabel: string;
 }
 
+function translateLabel(label: string): string {
+	return ZH_LABELS.get(label) ?? label;
+}
+
 /** 翻译菜单对象（返回新对象；label 仅过操作项字典，服务器名/工具名不受影响） */
 function translateMenu(menu: McpMenu): McpMenu {
 	return {
@@ -285,7 +290,7 @@ function translateMenu(menu: McpMenu): McpMenu {
 		cancelLabel: translateText(menu.cancelLabel),
 		items: menu.items.map((item) => ({
 			...item,
-			label: ZH_LABELS.get(item.label) ?? item.label,
+			label: translateLabel(item.label),
 			description: item.description === undefined ? undefined : translateText(item.description),
 		})),
 	};
@@ -297,11 +302,12 @@ function translateMenu(menu: McpMenu): McpMenu {
 
 /** McpManagerView 的最小结构（dist/extensions/mcp/ui.js；字段在编译产物中为公开） */
 interface McpManagerViewLike extends Component {
+	content: Component;
 	tui: { requestRender(): void };
 	theme: Theme;
 	keybindings: KeybindingsManager;
 	menu(build: () => McpMenu, subscribe?: (listener: () => void) => () => void): Promise<string | undefined>;
-	status(title: string, message: string): void;
+	status(title: string, message: string, onCancel?: () => void): void;
 	redirectUrl(title: string, authorizationUrl: string, signal: AbortSignal): Promise<string | undefined>;
 	setContent(content: Component, inputHandler?: (data: string) => void, inputTarget?: unknown): void;
 }
@@ -309,6 +315,7 @@ interface McpManagerViewLike extends Component {
 /** 翻译实现句柄：存在共享 ctx.ui 上，/reload 后由新模块实例刷新 */
 interface ZhImpl {
 	translateText: typeof translateText;
+	translateLabel: typeof translateLabel;
 	translateMenu: typeof translateMenu;
 	redirectUrl(view: McpManagerViewLike, title: string, authorizationUrl: string, signal: AbortSignal): Promise<string | undefined>;
 }
@@ -452,7 +459,60 @@ function isMcpManagerView(value: unknown): value is McpManagerViewLike {
 	);
 }
 
-/** 包装视图实例的三个方法（幂等）；实现经 holder.impl 间接引用以支持 /reload 刷新 */
+/** CSI 样式序列分隔符：仅翻译普通文本段，ANSI 样式原样保留。 */
+const ANSI_CSI_SEGMENT = /(\x1B\[[0-?]*[ -/]*[@-~])/g;
+
+/** 翻译带 ANSI 的 Text 内容；保留每个文本段的前后空白。 */
+function translateStyledText(text: string, translate: (value: string) => string): string {
+	return text
+		.split(ANSI_CSI_SEGMENT)
+		.map((part, index) => {
+			if (index % 2 === 1) return part;
+			const match = part.match(/^(\s*)([\s\S]*?)(\s*)$/);
+			if (!match?.[2]) return part;
+			return `${match[1]}${translate(match[2])}${match[3]}`;
+		})
+		.join("");
+}
+
+/**
+ * 翻译 factory 返回前已经同步生成的首屏内容。
+ * showMcpManager 在 return view 前调用 manage(view)，首个 menu() 的 render 已完成，
+ * 所以只包装后续 menu() 会漏掉首屏。这里按结构遍历 Text / SelectList / Container，
+ * 不改服务器值，也不依赖 pi-tui 类实例（bundle 与扩展可能各有一份模块）。
+ */
+function translateExistingContent(component: unknown, impl: ZhImpl): void {
+	if (!component || typeof component !== "object") return;
+	const candidate = component as {
+		text?: unknown;
+		setText?: unknown;
+		items?: unknown;
+		filteredItems?: unknown;
+		children?: unknown;
+	};
+	if (typeof candidate.text === "string" && typeof candidate.setText === "function") {
+		(candidate.setText as (text: string) => void).call(
+			component,
+			translateStyledText(candidate.text, impl.translateText),
+		);
+	}
+	const seen = new Set<object>();
+	for (const list of [candidate.items, candidate.filteredItems]) {
+		if (!Array.isArray(list)) continue;
+		for (const item of list) {
+			if (!item || typeof item !== "object" || seen.has(item)) continue;
+			seen.add(item);
+			const entry = item as { label?: unknown; description?: unknown };
+			if (typeof entry.label === "string") entry.label = impl.translateLabel(entry.label);
+			if (typeof entry.description === "string") entry.description = impl.translateText(entry.description);
+		}
+	}
+	if (Array.isArray(candidate.children)) {
+		for (const child of candidate.children) translateExistingContent(child, impl);
+	}
+}
+
+/** 包装视图实例的 menu/status/redirectUrl/setContent（幂等）；实现经 holder.impl 间接引用以支持 /reload 刷新 */
 function wrapMcpView(view: McpManagerViewLike, holder: { impl: ZhImpl }): void {
 	const v = view as McpManagerViewLike & { __zhForPiMcpView?: boolean };
 	if (v.__zhForPiMcpView) return;
@@ -460,8 +520,17 @@ function wrapMcpView(view: McpManagerViewLike, holder: { impl: ZhImpl }): void {
 	const origMenu = view.menu.bind(view);
 	v.menu = (build, subscribe) => origMenu(() => holder.impl.translateMenu(build()), subscribe);
 	const origStatus = view.status.bind(view);
-	v.status = (title, message) => origStatus(holder.impl.translateText(title), holder.impl.translateText(message));
+	v.status = (title, message, onCancel) =>
+		origStatus(holder.impl.translateText(title), holder.impl.translateText(message), onCancel);
 	v.redirectUrl = (title, authorizationUrl, signal) => holder.impl.redirectUrl(view, title, authorizationUrl, signal);
+	const origSetContent = view.setContent.bind(view);
+	v.setContent = (content, inputHandler, inputTarget) => {
+		translateExistingContent(content, holder.impl);
+		origSetContent(content, inputHandler, inputTarget);
+	};
+	// 首个 menu 在 factory 返回前已 render；其订阅重渲染则经过上面的 setContent 包装。
+	translateExistingContent(view.content, holder.impl);
+	view.invalidate();
 }
 
 type UiMethod = (...args: any[]) => any;
@@ -473,9 +542,9 @@ type UiMethod = (...args: any[]) => any;
 function wrapUiContext(ui: Record<string, unknown>): void {
 	const holder = ((ui as UiWithMcpZh).__zhForPiMcp ??= {
 		wrapped: false,
-		impl: { translateText, translateMenu, redirectUrl: zhRedirectUrl },
+		impl: { translateText, translateLabel, translateMenu, redirectUrl: zhRedirectUrl },
 	});
-	holder.impl = { translateText, translateMenu, redirectUrl: zhRedirectUrl };
+	holder.impl = { translateText, translateLabel, translateMenu, redirectUrl: zhRedirectUrl };
 	if (holder.wrapped) return;
 	if (typeof ui.custom !== "function" || typeof ui.notify !== "function") return;
 

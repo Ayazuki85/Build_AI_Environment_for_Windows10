@@ -13,6 +13,6 @@
 
 ## 维护
 
-- pi 升级后同步：`diff /home/zk/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/examples/extensions/subagent/index.ts index.ts`，人工合并上游改动后重新应用上述定制点；
-- agent 定义在 `~/.pi/agent/agents/*.md`，新增时不要写 `model:` 字段（写了会使该 agent 的模型脱离会话对齐）；
-- 设计规格：`~/.pi/agent/docs/specs/2026-08-28-custom-subagent-extension-design.md`。
+- pi 升级后同步：先运行 `npm root -g` 定位全局依赖根，再将 `<npm-root>/@earendil-works/pi-coding-agent/examples/extensions/subagent/index.ts` 与本地 `index.ts` 做 diff，人工合并上游改动后重新应用上述定制点；
+- 1.5.0 已合并上游 `formatReadLineRange()`，用于正确显示数字字符串或 `null` 形式的 read 行号参数；
+- agent 定义在 `~/.pi/agent/agents/*.md`，新增时不要写 `model:` 字段（写了会使该 agent 的模型脱离会话对齐）。

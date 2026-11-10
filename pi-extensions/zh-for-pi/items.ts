@@ -4,7 +4,7 @@
  * 数据驱动：pi 更新增删设置项时只需改动本表。
  * 纯数据 + 纯函数，不 import 任何 pi 包，可用 node --test 直接测试。
  *
- * 对应 pi 版本：1.5.0
+ * 对应 pi 版本：1.5.1
  * 条目顺序 = 内置面板顺序（bundle 提取）：图片/编辑器/终端类紧跟 autocompact。
  * 条件显示：仅 show-images、image-width-cells 依赖终端图片支持（内置行为，
  * spec 表格误标 4 项）；auto-resize-images、block-images 无条件显示。
@@ -169,7 +169,7 @@ export const ITEMS: ItemDef[] = [
 		options: HTTP_IDLE_TIMEOUT_CHOICES.map((c) => ({ display: formatHttpIdleTimeout(c.timeoutMs), raw: c.timeoutMs })),
 		formatFallback: (raw) => formatHttpIdleTimeout(Number(raw)),
 	},
-	sel("cache-warming-mode", "缓存预热", "off=关闭；streaming=agent 运行期间预热；idle=运行间隙仍有收益时也预热", ["cacheWarming"], "streaming", [
+	sel("cache-warming-mode", "缓存预热", "off=关闭；streaming=agent 运行期间预热；idle=运行间隙仍有收益时也预热", ["cacheWarming"], "idle", [
 		["关 (off)", "off"],
 		["流式 (streaming)", "streaming"],
 		["空闲 (idle)", "idle"],

@@ -27,7 +27,7 @@
  *   检查前不应影响 shell 选择，也避免不可信仓库注入 shellPath）
  * - 仅在 TUI 模式注册覆盖（print/rpc 无渲染需求，不动内置工具）
  *
- * 对应 pi 版本：1.5.0
+ * 对应 pi 版本：1.5.1
  * 1.5.0 同步：stripAnsi 接受紧跟真实 CSI 引导符的 <、=、> 私有前缀，
  * 完整剥离 ESC[<35;59;1M 等序列，同时保留 ESC= / ESC> 后的普通文本。
  * 1.4.0 同步：渲染逻辑无变更（renderers/bash.js 的 BASH_PREVIEW_LINES=5、
@@ -93,7 +93,7 @@ type ZhBashResult = AgentToolResult<BashToolDetails | undefined>;
 
 // —— 内置 render-utils 的本地化复刻（stripAnsi / sanitizeBinaryOutput 未公开导出）——
 
-// 派生自 ansi-regex（MIT，Sindre Sorhus）——与 1.5.0 的 dist/utils/ansi.js 同一实现
+// 派生自 ansi-regex（MIT，Sindre Sorhus）——与 1.5.1 的 dist/utils/ansi.js 同一实现
 function ansiRegex(): RegExp {
 	const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
 	const osc = `(?:\\u001B\\][\\s\\S]*?${ST})`;
