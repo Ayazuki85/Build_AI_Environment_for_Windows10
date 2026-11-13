@@ -1,6 +1,6 @@
 // 运行时：全局 registry + 永不变的 trampoline + 装载守卫。
 // 热插拔原理：registry 挂在 globalThis[Symbol.for(...)] 上跨 /reload 存活；
-// 扩展加载时只替换 registry.impl；trampoline 按调用时刻读取 impl/enabled。
+// 扩展加载时只替换 registry.impl；trampoline 按调用时刻读取 impl。
 
 export const METHODS = [
   "handleSelectionMouseEvent",
@@ -16,14 +16,13 @@ export type ImplFn = (tui: any, orig: (...args: any[]) => any, ...args: any[]) =
 export interface Registry {
   orig: Partial<Record<MethodName, ImplFn>>
   impl: Partial<Record<MethodName, ImplFn>> | null
-  enabled: boolean
 }
 
 const KEY = Symbol.for("smart-selection.registry")
 
 export function getRegistry(): Registry {
   const g = globalThis as Record<symbol, Registry | undefined>
-  g[KEY] ??= { orig: {}, impl: null, enabled: true }
+  g[KEY] ??= { orig: {}, impl: null }
   return g[KEY]
 }
 
@@ -37,7 +36,7 @@ function makeTrampoline(name: MethodName) {
     // Registry 里存的 orig 实为 pi 原始方法（非 ImplFn 形状），按普通变参函数调用
     const orig = reg.orig[name]! as (...args: any[]) => any
     const bound = (...a: unknown[]) => orig.apply(this, a)
-    const impl = reg.enabled ? reg.impl?.[name] : undefined
+    const impl = reg.impl?.[name]
     if (!impl) return bound(...args)
     try {
       return impl(this, bound, ...args)
