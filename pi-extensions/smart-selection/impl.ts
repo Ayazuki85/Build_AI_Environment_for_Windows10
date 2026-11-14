@@ -2,8 +2,14 @@
 // 约定：impl(tui, orig, ...args)；状态存 tui.__smartSelDrag。
 import { cellTextArea, locateCell, parseTables, type CellRef, type TableModel } from "./engine.ts"
 import { buildMarkdownTable, joinWrapped } from "./extract.ts"
+import { unwrapVisualLines } from "./normalizer.ts"
 import type { ImplFn, MethodName } from "./runtime.ts"
-import { slicePlainByColumn } from "./term-text.ts"
+import {
+  commonLeadingWhitespace,
+  contentStartColumn,
+  contentWidthWithoutTrailingWhitespace,
+  slicePlainByColumn,
+} from "./term-text.ts"
 
 export type DragCtx =
   | { mode: "rect" }
@@ -139,6 +145,24 @@ function getSelectionBoundsImpl(tui: any, orig: (...a: any[]) => any) {
   }
 }
 
+function selectionCoordinateContext(tui: any, selection: any, bounds: any, line: string, row: number) {
+  const scrollView = selection.start.scrollView
+  if (!scrollView || !bounds?.start.scrollView) return { line, offsetX: 0 }
+  const box = findScrollBox(tui.currentLayout, scrollView)
+  if (!box) return { line, offsetX: 0 }
+  const toScreen = (point: any) => ({
+    row: box.rect.y + point.row - scrollView.scrollTop,
+    col: box.rect.x + point.col,
+  })
+  const start = toScreen(bounds.start)
+  const end = toScreen(bounds.end)
+  const isScreenSelection = selection.start.row === start.row && selection.start.col === start.col &&
+    selection.end.row === end.row && selection.end.col === end.col
+  if (!isScreenSelection) return { line, offsetX: 0 }
+  const contentRow = row - box.rect.y + scrollView.scrollTop
+  return { line: box.scrollContentLines?.[contentRow] ?? line, offsetX: box.rect.x }
+}
+
 function getSelectionColumnsImpl(
   tui: any,
   orig: (...a: any[]) => any,
@@ -162,7 +186,22 @@ function getSelectionColumnsImpl(
     )
   }
   const r = resolveTable(tui)
-  if (!r || !selection) return orig(line, row, selection, minColumn, maxColumn)
+  if (!r || !selection) {
+    const columns = orig(line, row, selection, minColumn, maxColumn)
+    if (drag?.mode === "rect" || !selection) return columns
+    const bounds = tui.getSelectionBounds?.() ?? selection
+    const common = commonLeadingWhitespace(
+      sourceLinesFor(tui, bounds.start.scrollView),
+      bounds.start.row,
+      bounds.end.row,
+    )
+    const context = selectionCoordinateContext(tui, selection, bounds, line, row)
+    return {
+      ...columns,
+      start: Math.max(columns.start, context.offsetX + contentStartColumn(context.line, common)),
+      end: Math.min(columns.end, context.offsetX + contentWidthWithoutTrailingWhitespace(context.line)),
+    }
+  }
   if (r.mode === "single-cell") {
     const [left, right] = cellTextArea(r.table, r.colIdxMin)
     return orig(
@@ -185,9 +224,24 @@ function getSelectionColumnsImpl(
   )
 }
 
+function selectionLeadingWhitespace(tui: any, bounds: any): number {
+  return commonLeadingWhitespace(
+    sourceLinesFor(tui, bounds.start.scrollView),
+    bounds.start.row,
+    bounds.end.row,
+  )
+}
+
 function getActiveSelectionTextImpl(tui: any, orig: (...a: any[]) => any) {
   const r = resolveTable(tui)
-  if (!r) return orig()
+  if (!r) {
+    const text = orig()
+    const drag = tui.__smartSelDrag as DragCtx | null
+    if (text === undefined || drag?.mode === "rect") return text
+    const bounds = tui.getSelectionBounds?.()
+    const leadingWhitespace = bounds ? selectionLeadingWhitespace(tui, bounds) : 1
+    return unwrapVisualLines(text, { leadingWhitespace, clipLeadingPadding: false })
+  }
   const anchor = tui.selectionAnchor as { scrollView?: unknown } | undefined
   const lines = sourceLinesFor(tui, anchor?.scrollView)
   if (r.mode !== "single-cell") {

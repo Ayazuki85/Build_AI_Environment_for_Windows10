@@ -1,7 +1,7 @@
 /**
  * zh-for-pi — write 工具调用块汉化（截断提示 / 无效参数）
  *
- * 直接复用 1.5.1 内置 write 渲染器，不再复刻路径解析或高亮缓存：
+ * 直接复用 1.5.2 内置 write 渲染器，不再复刻路径解析或高亮缓存：
  *   ... (313 more lines, 323 total, ctrl+o to expand)  →  ...（还有 313 行，共 323 行，ctrl+o 展开）
  *   [invalid content arg - expected string]            →  [无效 content 参数 - 应为字符串]
  *
@@ -14,7 +14,7 @@
  * 只翻译由参数和折叠状态确认的提示，避免误改代码正文中的相似文本。若上游文案变化，
  * 精确匹配会失败并安全回退为英文，不影响渲染。
  *
- * 对应 pi 版本：1.5.1
+ * 对应 pi 版本：1.5.2
  */
 
 import { createWriteToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";

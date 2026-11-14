@@ -36,7 +36,7 @@
  * - 非 TUI 模式的 `pi mcp` CLI 输出（cli.js）不在范围
  * - 要恢复内置英文：删除 index.ts 中 installMcpZhFeature(pi) 一行并 /reload
  *
- * 对应 pi 版本：1.5.1（文案来源：dist/extensions/mcp/index.js 的
+ * 对应 pi 版本：1.5.2（文案来源：dist/extensions/mcp/index.js 的
  * serversMenu/serverMenu/showTools/chooseExposure/runAction/formatStatus/
  * loginCommand 与 dist/extensions/mcp/ui.js 的 McpManagerView；打包位置可用
  * `grep -ln "Nothing to show." R/bundle/chunks/*.js` 复核）
@@ -87,6 +87,8 @@ const ZH_EXACT: ReadonlyMap<string, string> = new Map([
 	["back", "返回"],
 	["select", "选择"],
 	["save", "保存"],
+	["submit", "提交"],
+	["cancel", "取消"],
 	// 加载与空态
 	["Loading…", "正在加载…"],
 	["Nothing to show.", "暂无内容。"],

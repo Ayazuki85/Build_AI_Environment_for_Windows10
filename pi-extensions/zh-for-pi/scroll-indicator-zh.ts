@@ -30,7 +30,7 @@
  * - 要恢复内置英文：删除 index.ts 中 installScrollIndicatorZhFeature(pi) 一行并
  *   重启 pi（原型补丁不随 /reload 卸载）
  *
- * 对应 pi 版本：1.5.1（文案模板见 dist/modes/interactive/tui-renderer.js 的
+ * 对应 pi 版本：1.5.2（文案模板见 dist/modes/interactive/tui-renderer.js 的
  * scrollToEndIndicator；触发条件见 pi-tui tui-alt-screen.js 的
  * compositeScrollToEndIndicator：followEnd && !isFollowingEnd 时叠加到底部居中）
  */

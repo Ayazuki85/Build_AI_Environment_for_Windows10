@@ -6,14 +6,26 @@
  *
  * Features:
  * - /plan command to toggle
- * - Bash restricted to allowlisted read-only commands
+ * - Shell commands filtered three ways: allow read-only, confirm unknown, block destructive
  * - Prompt to exit plan mode after each agent response
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isSafeCommand } from "./utils.ts";
+import { type Analysis, analyzeCommand, analyzePowerShell, clipText } from "./utils.ts";
+
+function buildBlockReason(analysis: Analysis, command: string): string {
+	const normalized = command.replace(/\s+/g, " ").trim();
+	const segment = analysis.segment?.replace(/\s+/g, " ").trim();
+	// Name the segment only when it is part of a compound command; a blocked
+	// whole command is already visible in the transcript above.
+	const where = segment && segment !== normalized ? `（分段 \`${clipText(segment)}\`）` : "";
+	const lines = [`计划模式已拦截${where}：${analysis.reason ?? "属于写操作"}。`];
+	if (analysis.suggestion) lines.push(`只读替代：${analysis.suggestion}。`);
+	lines.push("如确需执行，请用户输入 /plan 退出计划模式；否则请改用只读方案，不要重试本命令。");
+	return lines.join("\n");
+}
 
 // Tools
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "ask_questions"];
@@ -81,17 +93,35 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => togglePlanMode(ctx),
 	});
 
-	// Block destructive bash commands in plan mode
-	pi.on("tool_call", async (event) => {
-		if (!planModeEnabled || event.toolName !== "bash") return;
+	// Filter shell commands in plan mode: allow read-only, confirm unknown, block destructive
+	pi.on("tool_call", async (event, ctx) => {
+		if (!planModeEnabled) return;
+		if (event.toolName !== "bash" && event.toolName !== "powershell") return;
 
-		const command = event.input.command as string;
-		if (!isSafeCommand(command)) {
+		const command = event.input.command;
+		const analysis = event.toolName === "bash" ? analyzeCommand(command) : analyzePowerShell(command);
+		if (analysis.decision === "allow") return;
+
+		if (analysis.decision === "ask" && ctx.hasUI) {
+			const approved = await ctx.ui.confirm(
+				"计划模式：允许执行该命令？",
+				`${command}\n\n${analysis.reason ?? "该命令不在只读白名单内。"}`,
+			);
+			if (approved) return;
 			return {
 				block: true,
-				reason: `计划模式：命令被拦截（不在只读白名单内）。如需执行请先使用 /plan 退出计划模式。\n命令：${command}`,
+				reason: "用户拒绝了该命令。请不要重试同类命令，改用只读方式继续分析，或请用户输入 /plan 退出计划模式。",
 			};
 		}
+
+		if (analysis.decision === "ask") {
+			return {
+				block: true,
+				reason: `计划模式：${analysis.reason ?? "命令无法确认只读"}，且当前无法向用户确认。请改用明确的只读命令，或请用户输入 /plan 退出计划模式。`,
+			};
+		}
+
+		return { block: true, reason: buildBlockReason(analysis, command) };
 	});
 
 	// Filter out stale plan mode context when not in plan mode
@@ -130,7 +160,8 @@ You are in plan mode - a read-only exploration mode for safe code analysis.
 Restrictions:
 - Built-in edit and write tools are disabled
 - Other currently active tools remain available
-- Bash is restricted to an allowlist of read-only commands
+- Bash and PowerShell are filtered: known read-only commands run freely, unknown commands ask the user for confirmation, destructive commands are blocked
+If a command is blocked, follow the read-only alternative in the error instead of retrying similar commands.
 
 Ask clarifying questions using the ask_questions tool.
 Use the available web search MCP tools (e.g. Tavily, exa) for web research.

@@ -1,9 +1,22 @@
-import { UserMessageComponent, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
-import { Markdown, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+  copyToClipboard,
+  UserMessageComponent,
+  type ExtensionAPI,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { hyperlink, Markdown, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { registerCjkMarkdownTransformer } from "./cjk-markdown.js";
+import { CodeCopyController } from "./code-copy.js";
+import {
+  installSharedPatch,
+  type SharedPatchState,
+  uninstallSharedPatch,
+} from "./patch-lifecycle.js";
 
 const MARKDOWN_PATCH_STATE = Symbol.for("pi-agent-beautify.markdown.patch");
 const USER_MESSAGE_PATCH_STATE = Symbol.for("pi-agent-beautify.user-message.patch");
+const MARKDOWN_LIST_PATCH_STATE = Symbol.for("pi-agent-beautify.markdown-list.patch.v2");
+const MARKDOWN_RENDER_PATCH_STATE = Symbol.for("pi-agent-beautify.markdown-render.patch.v2");
 const PLAIN_CODE_LANGS = new Set(["text", "plain", "plaintext"]);
 /** Left accent bar for user messages (1 terminal column). */
 const USER_MESSAGE_BAR = "▎";
@@ -82,6 +95,7 @@ interface InlineStyleContext {
 
 interface MarkdownRuntime {
   theme: BeautifyMarkdownTheme;
+  invalidate?: () => void;
   applyDefaultStyle?: (text: string) => string;
   getStylePrefix?: (styleFn: (text: string) => string) => string;
   renderInlineTokens?: (tokens: unknown[], styleContext?: InlineStyleContext) => string;
@@ -90,19 +104,42 @@ interface MarkdownRuntime {
 type MarkdownRenderToken = (this: MarkdownRuntime, token: unknown, width: number, nextTokenType?: string, styleContext?: unknown) => string[];
 type MarkdownRenderList = (this: MarkdownRuntime, token: MarkdownListToken, depth: number, width: number, styleContext?: unknown) => string[];
 
-interface MarkdownPatchState {
-  installed: true;
-  original: MarkdownRenderToken;
-  originalRenderList?: MarkdownRenderList;
-  listInstalled?: boolean;
-  /** Background painter matching tool-execution panels (e.g. theme.bg("toolPendingBg", ...)). */
+interface MarkdownTokenPatchState extends SharedPatchState<MarkdownRenderToken> {
   codeBlockBg?: (text: string) => string;
-  renderCodeToken: (instance: MarkdownRuntime, token: MarkdownCodeToken, width: number, nextTokenType?: string) => string[];
-  renderHeadingToken: (instance: MarkdownRuntime, token: MarkdownHeadingToken, width: number, nextTokenType?: string) => string[];
-  renderList?: (instance: MarkdownRuntime, token: MarkdownListToken, depth: number, width: number, styleContext?: unknown) => string[];
+  renderCodeToken: (
+    instance: MarkdownRuntime,
+    token: MarkdownCodeToken,
+    width: number,
+    nextTokenType?: string,
+  ) => string[];
+  renderHeadingToken: (
+    instance: MarkdownRuntime,
+    token: MarkdownHeadingToken,
+    width: number,
+    nextTokenType?: string,
+  ) => string[];
+}
+
+interface MarkdownListPatchState extends SharedPatchState<MarkdownRenderList> {
+  renderList: (
+    instance: MarkdownRuntime,
+    token: MarkdownListToken,
+    depth: number,
+    width: number,
+    styleContext?: unknown,
+  ) => string[];
+}
+
+type MarkdownRender = (this: MarkdownRuntime, width: number) => string[];
+
+interface MarkdownRenderPatchState extends SharedPatchState<MarkdownRender> {
+  codeCopy: CodeCopyController;
+  versions: WeakMap<object, number>;
+  instances: Set<WeakRef<MarkdownRuntime>>;
 }
 
 type PatchedMarkdownPrototype = {
+  render?: MarkdownRender;
   renderToken?: MarkdownRenderToken;
   renderList?: MarkdownRenderList;
   [key: symbol]: unknown;
@@ -166,18 +203,17 @@ function renderCodeTokenWithoutFences(
   instance: MarkdownRuntime,
   token: MarkdownCodeToken,
   width: number,
-  nextTokenType?: string,
+  nextTokenType: string | undefined,
+  codeCopy: CodeCopyController,
+  backgroundPainter?: (text: string) => string,
 ): string[] {
   const raw = typeof token.text === "string" ? token.text : "";
   const langRaw = typeof token.lang === "string" ? token.lang.trim() : "";
   const lang = langRaw.toLowerCase();
   const lines: string[] = [];
   const indent = instance.theme.codeBlockIndent ?? "  ";
-  const proto = Markdown.prototype as unknown as PatchedMarkdownPrototype;
-  const bgFn = (proto[MARKDOWN_PATCH_STATE] as MarkdownPatchState | undefined)?.codeBlockBg;
+  const bgFn = backgroundPainter;
   const w = Math.max(1, width);
-  // Keep at least two columns for code so wide graphemes never have to fit in
-  // a one-column remainder beside the indent.
   const fittedIndent = w - visibleWidth(indent) >= 2 ? indent : "";
   const textWidth = w - visibleWidth(fittedIndent);
 
@@ -194,7 +230,13 @@ function renderCodeTokenWithoutFences(
 
   // No raw ``` fences, no box-drawing glyphs.
   // Tool-panel background + light indent keeps blocks distinct and copy-safe.
-  lines.push(paintCodeLine("", w, bgFn));
+  let header = "";
+  try {
+    header = codeCopy.renderHeader({ lang: langRaw, code: raw }, w, instance.theme.codeBlockBorder);
+  } catch {
+    // Copy-button helpers are optional chrome: preserve the existing blank top row and body.
+  }
+  lines.push(paintCodeLine(header, w, bgFn));
   if (contentLines.length === 0) {
     lines.push(paintCodeLine(fittedIndent, w, bgFn));
   } else {
@@ -379,7 +421,7 @@ function renderListWithNaturalBullets(
   styleContext?: unknown,
 ): string[] {
   const proto = Markdown.prototype as unknown as PatchedMarkdownPrototype;
-  const original = (proto[MARKDOWN_PATCH_STATE] as MarkdownPatchState | undefined)?.originalRenderList;
+  const original = (proto[MARKDOWN_LIST_PATCH_STATE] as MarkdownListPatchState | undefined)?.original;
   if (!original) return [];
 
   // Pi retains ownership of parsing, nesting, task markers, wrapping, and spacing.
@@ -394,61 +436,109 @@ function renderListWithNaturalBullets(
   return lines.map((line) => replaceListMarkerAtVisibleColumn(line, markerColumn, bullet));
 }
 
-function installMarkdownListPatch(proto: PatchedMarkdownPrototype, state: MarkdownPatchState): void {
-  // Refresh the implementation on /reload, but capture the upstream renderer only once.
-  state.renderList = renderListWithNaturalBullets;
-  if (state.listInstalled) return;
-
-  const original = state.originalRenderList ?? proto.renderList;
-  if (typeof original !== "function") return;
-  state.originalRenderList = original;
-  state.listInstalled = true;
-
-  proto.renderList = function (this: MarkdownRuntime, token: MarkdownListToken, depth: number, width: number, styleContext?: unknown): string[] {
-    const current = proto[MARKDOWN_PATCH_STATE] as MarkdownPatchState | undefined;
-    if (current?.renderList && current.originalRenderList) return current.renderList(this, token, depth, width, styleContext);
-    return original.call(this, token, depth, width, styleContext);
-  };
+function migrateLegacyMarkdownPatches(proto: PatchedMarkdownPrototype): void {
+  const legacy = proto[MARKDOWN_PATCH_STATE] as {
+    installed?: boolean;
+    wrapper?: unknown;
+    original?: MarkdownRenderToken;
+    originalRenderList?: MarkdownRenderList;
+  } | undefined;
+  if (!legacy?.installed || typeof legacy.wrapper === "function") return;
+  // The pre-lifecycle version had no active flag or stored wrapper. Restore its originals once so
+  // its old wrappers cannot remain above the new active-aware shared wrappers after the first reload.
+  if (typeof legacy.original === "function") proto.renderToken = legacy.original;
+  if (typeof legacy.originalRenderList === "function") proto.renderList = legacy.originalRenderList;
+  delete proto[MARKDOWN_PATCH_STATE];
 }
 
-function installMarkdownBeautifyPatch(): void {
+function installMarkdownListPatch(proto: PatchedMarkdownPrototype): void {
+  const state = installSharedPatch<MarkdownRenderList>(
+    proto as Record<PropertyKey, unknown>,
+    "renderList",
+    MARKDOWN_LIST_PATCH_STATE,
+    (original, patch) =>
+      function (this: MarkdownRuntime, token: MarkdownListToken, depth: number, width: number, styleContext?: unknown): string[] {
+        const current = patch as MarkdownListPatchState;
+        if (!patch.active) return original.call(this, token, depth, width, styleContext);
+        return current.renderList(this, token, depth, width, styleContext);
+      },
+  ) as MarkdownListPatchState;
+  state.renderList = renderListWithNaturalBullets;
+}
+
+function installMarkdownRenderPatch(
+  proto: PatchedMarkdownPrototype,
+  codeCopy: CodeCopyController,
+): void {
+  const state = installSharedPatch<MarkdownRender>(
+    proto as Record<PropertyKey, unknown>,
+    "render",
+    MARKDOWN_RENDER_PATCH_STATE,
+    (original, patch) =>
+      function (this: MarkdownRuntime, width: number): string[] {
+        if (!patch.active) return original.call(this, width);
+        const current = patch as MarkdownRenderPatchState;
+        // Pi keeps one stable proxy while switchTuiMode() replaces its concrete renderer.
+        // Reconcile before the cache-version check so a mode change invalidates cached headers.
+        current.codeCopy.reconcileLinkTarget();
+        const version = current.codeCopy.renderVersion;
+        const previous = current.versions.get(this);
+        if (previous === undefined) current.instances.add(new WeakRef(this));
+        // An untracked instance may have cached stock output while the extension was removed.
+        if (previous !== version) this.invalidate?.();
+        current.versions.set(this, version);
+        return original.call(this, width);
+      },
+  ) as MarkdownRenderPatchState;
+  state.codeCopy = codeCopy;
+  state.versions ??= new WeakMap<object, number>();
+  state.instances ??= new Set<WeakRef<MarkdownRuntime>>();
+}
+
+function installMarkdownBeautifyPatch(codeCopy: CodeCopyController): void {
   const proto = Markdown.prototype as unknown as PatchedMarkdownPrototype;
-  const existing = proto[MARKDOWN_PATCH_STATE] as MarkdownPatchState | undefined;
-  if (existing?.installed) {
-    existing.codeBlockBg = paintToolPanelBg;
-    existing.renderCodeToken = renderCodeTokenWithoutFences;
-    existing.renderHeadingToken = renderHeadingTokenNatural;
-    installMarkdownListPatch(proto, existing);
-    return;
+  migrateLegacyMarkdownPatches(proto);
+  const state = installSharedPatch<MarkdownRenderToken>(
+    proto as Record<PropertyKey, unknown>,
+    "renderToken",
+    MARKDOWN_PATCH_STATE,
+    (original, patch) =>
+      function (this: MarkdownRuntime, token: unknown, width: number, nextTokenType?: string, styleContext?: unknown): string[] {
+        const current = patch as MarkdownTokenPatchState;
+        if (!patch.active) return original.call(this, token, width, nextTokenType, styleContext);
+        if (isMarkdownHeadingToken(token)) return current.renderHeadingToken(this, token, width, nextTokenType);
+        if (isMarkdownCodeToken(token)) return current.renderCodeToken(this, token, width, nextTokenType);
+        return original.call(this, token, width, nextTokenType, styleContext);
+      },
+  ) as MarkdownTokenPatchState;
+  state.codeBlockBg = paintToolPanelBg;
+  state.renderHeadingToken = renderHeadingTokenNatural;
+  state.renderCodeToken = (instance, token, width, nextTokenType) =>
+    renderCodeTokenWithoutFences(instance, token, width, nextTokenType, codeCopy, state.codeBlockBg);
+  installMarkdownListPatch(proto);
+  installMarkdownRenderPatch(proto, codeCopy);
+}
+
+function uninstallMarkdownBeautifyPatch(): void {
+  const proto = Markdown.prototype as unknown as PatchedMarkdownPrototype;
+  const renderState = proto[MARKDOWN_RENDER_PATCH_STATE] as MarkdownRenderPatchState | undefined;
+  for (const reference of renderState?.instances ?? []) {
+    const instance = reference.deref();
+    if (!instance) continue;
+    instance.invalidate?.();
+    // A later activation starts again at version 1. Delete the old record so the
+    // next render tracks this instance and the following shutdown can invalidate it.
+    renderState?.versions.delete(instance);
   }
-
-  const original = proto.renderToken;
-  if (typeof original !== "function") return;
-
-  const state: MarkdownPatchState = {
-    installed: true,
-    original,
-    codeBlockBg: paintToolPanelBg,
-    renderCodeToken: renderCodeTokenWithoutFences,
-    renderHeadingToken: renderHeadingTokenNatural,
-  };
-  proto[MARKDOWN_PATCH_STATE] = state;
-
-  proto.renderToken = function (this: MarkdownRuntime, token: unknown, width: number, nextTokenType?: string, styleContext?: unknown): string[] {
-    const current = proto[MARKDOWN_PATCH_STATE] as MarkdownPatchState | undefined;
-    if (current && isMarkdownHeadingToken(token)) return current.renderHeadingToken(this, token, width, nextTokenType);
-    if (current && isMarkdownCodeToken(token)) return current.renderCodeToken(this, token, width, nextTokenType);
-    return (current?.original ?? original).call(this, token, width, nextTokenType, styleContext);
-  };
-  installMarkdownListPatch(proto, state);
+  renderState?.instances.clear();
+  uninstallSharedPatch(proto as Record<PropertyKey, unknown>, "renderToken", MARKDOWN_PATCH_STATE);
+  uninstallSharedPatch(proto as Record<PropertyKey, unknown>, "renderList", MARKDOWN_LIST_PATCH_STATE);
+  uninstallSharedPatch(proto as Record<PropertyKey, unknown>, "render", MARKDOWN_RENDER_PATCH_STATE);
 }
 
 type UserMessageRender = (this: unknown, width: number) => string[];
 
-interface UserMessagePatchState {
-  installed: true;
-  original: UserMessageRender;
-}
+type UserMessagePatchState = SharedPatchState<UserMessageRender>;
 
 type PatchedUserMessagePrototype = {
   render?: UserMessageRender;
@@ -492,32 +582,55 @@ function withUserMessageBar(lines: string[]): string[] {
   return painted;
 }
 
+function migrateLegacyUserMessagePatch(proto: PatchedUserMessagePrototype): void {
+  const legacy = proto[USER_MESSAGE_PATCH_STATE] as {
+    installed?: boolean;
+    wrapper?: unknown;
+    original?: UserMessageRender;
+  } | undefined;
+  if (!legacy?.installed || typeof legacy.wrapper === "function") return;
+  if (typeof legacy.original === "function") proto.render = legacy.original;
+  delete proto[USER_MESSAGE_PATCH_STATE];
+}
+
 function installUserMessageBarPatch(): void {
   const proto = UserMessageComponent.prototype as unknown as PatchedUserMessagePrototype;
-  const existing = proto[USER_MESSAGE_PATCH_STATE] as UserMessagePatchState | undefined;
-  if (existing?.installed) return;
+  migrateLegacyUserMessagePatch(proto);
+  installSharedPatch<UserMessageRender>(
+    proto as Record<PropertyKey, unknown>,
+    "render",
+    USER_MESSAGE_PATCH_STATE,
+    (original, patch) =>
+      function (this: unknown, width: number): string[] {
+        if (!patch.active) return original.call(this, width);
+        const barWidth = visibleWidth(USER_MESSAGE_BAR);
+        const contentWidth = Math.max(1, width - barWidth);
+        return withUserMessageBar(original.call(this, contentWidth));
+      },
+  );
+}
 
-  const original = proto.render;
-  if (typeof original !== "function") return;
-
-  const state: UserMessagePatchState = {
-    installed: true,
-    original,
-  };
-  proto[USER_MESSAGE_PATCH_STATE] = state;
-
-  proto.render = function (this: unknown, width: number): string[] {
-    const current = proto[USER_MESSAGE_PATCH_STATE] as UserMessagePatchState | undefined;
-    const barWidth = visibleWidth(USER_MESSAGE_BAR);
-    // Lay out content one column narrower so the bar never overflows.
-    const contentWidth = Math.max(1, width - barWidth);
-    const lines = (current?.original ?? original).call(this, contentWidth);
-    return withUserMessageBar(lines);
-  };
+function uninstallUserMessageBarPatch(): void {
+  const proto = UserMessageComponent.prototype as unknown as PatchedUserMessagePrototype;
+  uninstallSharedPatch(proto as Record<PropertyKey, unknown>, "render", USER_MESSAGE_PATCH_STATE);
 }
 
 export default function piAgentBeautify(pi: ExtensionAPI) {
-  installMarkdownBeautifyPatch();
+  const codeCopy = new CodeCopyController({
+    piCopy: copyToClipboard,
+    measure: visibleWidth,
+    link: hyperlink,
+  });
+  installMarkdownBeautifyPatch(codeCopy);
   installUserMessageBarPatch();
   registerCjkMarkdownTransformer(pi);
+
+  pi.on("session_start", (_event, ctx) => {
+    codeCopy.activate(ctx);
+  });
+  pi.on("session_shutdown", () => {
+    codeCopy.deactivate();
+    uninstallMarkdownBeautifyPatch();
+    uninstallUserMessageBarPatch();
+  });
 }

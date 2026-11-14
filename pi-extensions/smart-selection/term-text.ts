@@ -1,6 +1,7 @@
-// 终端文本工具（vendored，零依赖）。
-// 精度说明：宽度表覆盖常用 CJK/emoji 区间与常见零宽码点，非完整 UAX#11；
-// 高亮侧字素对齐由 pi 原版方法完成，本模块仅服务复制文本切片，极端码点最多差一格边界字符。
+// 终端文本工具：表格切片使用本地宽度表；高亮内容边界委托 pi-tui 的完整字素宽度实现。
+// 本地宽度表覆盖常用 CJK/emoji 区间与常见零宽码点，非完整 UAX#11。
+
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui"
 
 const ANSI_PATTERN =
   // eslint-disable-next-line no-control-regex
@@ -50,6 +51,51 @@ export function widthOf(text: string): number {
   let w = 0
   for (const ch of text) w += codePointWidth(ch.codePointAt(0)!)
   return w
+}
+
+export function contentWidthWithoutTrailingWhitespace(raw: string): number {
+  return visibleWidth(stripTerminalSequences(raw).trimEnd())
+}
+
+const USER_MESSAGE_BAR = "▎"
+
+interface LeadingPadding {
+  chromeWidth: number
+  whitespaceWidth: number
+  blank: boolean
+}
+
+function leadingPadding(raw: string): LeadingPadding {
+  const plain = stripTerminalSequences(raw)
+  const chromeWidth = plain.startsWith(USER_MESSAGE_BAR) ? visibleWidth(USER_MESSAGE_BAR) : 0
+  const body = chromeWidth ? plain.slice(USER_MESSAGE_BAR.length) : plain
+  const whitespace = /^[ \t]*/.exec(body)?.[0] ?? ""
+  return { chromeWidth, whitespaceWidth: visibleWidth(whitespace), blank: body.trim().length === 0 }
+}
+
+/** Content start after UI chrome and the selection's common renderer padding. */
+export function contentStartColumn(raw: string, commonWhitespace: number): number {
+  const padding = leadingPadding(raw)
+  return padding.chromeWidth + Math.min(commonWhitespace, padding.whitespaceWidth)
+}
+
+const leadingCache = new WeakMap<readonly string[], { startRow: number; endRow: number; value: number }>()
+
+/** Minimum leading whitespace across nonblank selected rows; extra indentation remains content. */
+export function commonLeadingWhitespace(lines: readonly string[], startRow: number, endRow: number): number {
+  const cached = leadingCache.get(lines)
+  if (cached && cached.startRow === startRow && cached.endRow === endRow) return cached.value
+  let common = Number.MAX_SAFE_INTEGER
+  const from = Math.max(0, Math.min(startRow, endRow))
+  const to = Math.min(lines.length - 1, Math.max(startRow, endRow))
+  for (let row = from; row <= to; row++) {
+    const padding = leadingPadding(lines[row] ?? "")
+    if (padding.blank) continue
+    common = Math.min(common, padding.whitespaceWidth)
+  }
+  const value = common === Number.MAX_SAFE_INTEGER ? 0 : common
+  leadingCache.set(lines, { startRow, endRow, value })
+  return value
 }
 
 export function slicePlainByColumn(raw: string, start: number, length: number): string {

@@ -1,5 +1,5 @@
 /**
- * smart-selection —— fullscreen 下 Markdown 表格语义选择
+ * smart-selection —— fullscreen 下表格语义选择、普通文本软换行整理与两侧渲染填充清理
  *
  * 加载即更新全局 registry.impl（/reload 热更新核心）；
  * session_start 借隐形 widget 拿 TUI 实例并安装 trampoline（幂等）。

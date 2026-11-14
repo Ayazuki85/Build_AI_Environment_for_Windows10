@@ -9,7 +9,7 @@
  * write 工具调用块汉化（截断提示，同名覆盖内置 write，见 write-zh.ts）、
  * 全屏模式「回到底部」浮动提示汉化（滚离底部时显示 ↓ 跳转到最新消息，见 scroll-indicator-zh.ts）。
  *
- * 对应 pi 版本：1.5.1
+ * 对应 pi 版本：1.5.2
  */
 import {
 	DynamicBorder,
