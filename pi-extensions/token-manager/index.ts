@@ -2,7 +2,7 @@
  * Token Manager：Kimi For Coding 用量 + DeepSeek 余额 + 阿里云 Token Plan 坐席管理扩展
  *
  * 功能：
- * - 状态栏跟随当前模型：Kimi 模型显示 5 小时/7 天套餐用量，DeepSeek 模型显示账户余额
+ * - 状态栏跟随当前模型：Kimi 模型按接口返回显示 5 小时/7 天/月度套餐用量，DeepSeek 模型显示账户余额
  * - `/token-manager` 打开三页管理界面（←→ 翻页）：第 1 页 Kimi 多 key 池管理，第 2 页 DeepSeek 余额，第 3 页 Token Plan 坐席
  * - 当前启用项每 3 分钟自动刷新
  *
@@ -212,6 +212,7 @@ export interface WindowUsage {
 export interface KeyUsage {
 	fiveHour?: WindowUsage;
 	weekly?: WindowUsage;
+	monthly?: WindowUsage;
 	invalid?: boolean; // 401/403
 	error?: string; // 网络/HTTP 错误
 	queriedAt?: number;
@@ -247,6 +248,82 @@ export function fmtCountdown(resetsAt?: string): string {
 	return `${m}m`;
 }
 
+export interface KimiUsageText {
+	five: string;
+	week: string;
+	month: string;
+	bad: boolean;
+	exhausted: boolean;
+}
+
+export function kimiUsageText(u: KeyUsage | undefined): KimiUsageText {
+	if (!u) return { five: "5h:  — ", week: "7d:  — ", month: "", bad: false, exhausted: false };
+	if (u.invalid) return { five: "5h:无效key", week: "7d:无效key", month: "", bad: true, exhausted: false };
+	if (u.error && !u.fiveHour && !u.weekly && !u.monthly) {
+		return { five: "5h:查询失败", week: "7d:查询失败", month: "", bad: true, exhausted: false };
+	}
+	const fmtWin = (w: WindowUsage): string => {
+		const cd = fmtCountdown(w.resetsAt);
+		return cd ? `${fmtPct(w.pct)} ${cd}` : fmtPct(w.pct);
+	};
+	const exhausted = (u.fiveHour?.pct ?? 0) >= 100 || (u.weekly?.pct ?? 0) >= 100 || (u.monthly?.pct ?? 0) >= 100;
+	return {
+		five: u.fiveHour ? `5h:${fmtWin(u.fiveHour)}` : "",
+		week: u.weekly ? `7d:${fmtWin(u.weekly)}` : "",
+		month: u.monthly ? `月:${fmtWin(u.monthly)}` : "",
+		bad: false,
+		exhausted,
+	};
+}
+
+export interface KimiStatusWindow {
+	text: string;
+	level: "ok" | "warn" | "crit";
+}
+
+export interface KimiStatusContent {
+	windows: KimiStatusWindow[];
+	exhausted: boolean;
+}
+
+/** 状态栏实际使用的窗口与颜色级别，便于脱离 TUI 验证接线。 */
+export function kimiStatusContent(u: KeyUsage | undefined): KimiStatusContent {
+	const t = kimiUsageText(u);
+	const windows: KimiStatusWindow[] = [];
+	const add = (text: string, pct: number | undefined): void => {
+		if (!text) return;
+		const level = t.bad || (pct !== undefined && pct >= CRIT_PCT)
+			? "crit"
+			: pct !== undefined && pct >= WARN_PCT
+				? "warn"
+				: "ok";
+		windows.push({ text, level });
+	};
+	add(t.five, u?.fiveHour?.pct);
+	add(t.week, u?.weekly?.pct);
+	add(t.month, u?.monthly?.pct);
+	return { windows, exhausted: t.exhausted };
+}
+
+/** 管理页单个 key 的实际行文案；index 从 0 起。 */
+export function kimiKeyOptionText(
+	index: number,
+	label: string,
+	labelWidth: number,
+	active: boolean,
+	u: KeyUsage | undefined,
+): string {
+	const t = kimiUsageText(u);
+	const parts = [`${index + 1}.`, active ? "●" : "○", padEnd(label, labelWidth)];
+	for (const windowText of [t.five, t.week, t.month]) {
+		if (windowText) parts.push(windowText.padEnd(14));
+	}
+	if (active) parts.push("← 当前生效");
+	else if (t.exhausted) parts.push("已达限额");
+	else if (t.bad) parts.push("");
+	return parts.join(" ").trimEnd();
+}
+
 // ── Kimi 用量窗口解析 ───────────────────────────────────────
 
 export function parseWindow(detail: unknown): WindowUsage | undefined {
@@ -275,6 +352,28 @@ export function parseWindow(detail: unknown): WindowUsage | undefined {
 		resetsAt = new Date(ms).toISOString();
 	}
 	return { pct, resetsAt };
+}
+
+/** 新版 usages 比例窗口：used_ratio 为 0-1 的已用比例。 */
+export function parseRatioWindow(detail: unknown): WindowUsage | undefined {
+	if (!detail || typeof detail !== "object") return undefined;
+	const d = detail as Record<string, unknown>;
+	const num = (v: unknown): number | undefined => {
+		if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+		if (typeof v === "string" && v.trim() !== "") {
+			const n = Number(v);
+			return Number.isFinite(n) ? n : undefined;
+		}
+		return undefined;
+	};
+	const ratio = num(d.used_ratio);
+	if (ratio === undefined || ratio < 0 || ratio > 1) return undefined;
+	let resetsAt: string | undefined;
+	if (typeof d.reset_time === "string") {
+		const ms = Date.parse(d.reset_time);
+		if (Number.isFinite(ms)) resetsAt = new Date(ms).toISOString();
+	}
+	return { pct: ratio * 100, resetsAt };
 }
 
 // ── 凭据与池类型 ────────────────────────────────────────────
@@ -438,7 +537,8 @@ export function kimiUsageFromBody(status: number, body: unknown): KeyUsage {
 	if (status === 401 || status === 403) return { invalid: true, queriedAt: Date.now() };
 	if (status !== 200) return { error: `HTTP ${status}`, queriedAt: Date.now() };
 	const usage: KeyUsage = { queriedAt: Date.now() };
-	const limits = (body as Record<string, unknown> | null)?.limits;
+	const root = body as Record<string, unknown> | null;
+	const limits = root?.limits;
 	if (Array.isArray(limits)) {
 		for (const item of limits) {
 			const detail = (item as Record<string, unknown> | null)?.detail;
@@ -449,9 +549,26 @@ export function kimiUsageFromBody(status: number, body: unknown): KeyUsage {
 			}
 		}
 	}
-	const weekly = parseWindow((body as Record<string, unknown> | null)?.usage);
+	const weekly = parseWindow(root?.usage);
 	if (weekly) usage.weekly = weekly;
-	if (!usage.fiveHour && !usage.weekly) usage.error = "响应中无用量数据";
+
+	const rawUsages = root?.usages;
+	const usages =
+		rawUsages && typeof rawUsages === "object" && !Array.isArray(rawUsages)
+			? (rawUsages as Record<string, unknown>)
+			: undefined;
+	if (!usage.fiveHour) {
+		const fiveHour = parseRatioWindow(usages?.limit_5h);
+		if (fiveHour) usage.fiveHour = fiveHour;
+	}
+	if (!usage.weekly) {
+		const weeklyRatio = parseRatioWindow(usages?.limit_7d);
+		if (weeklyRatio) usage.weekly = weeklyRatio;
+	}
+	const monthly = parseRatioWindow(usages?.limit_month_total);
+	if (monthly) usage.monthly = monthly;
+
+	if (!usage.fiveHour && !usage.weekly && !usage.monthly) usage.error = "响应中无用量数据";
 	return usage;
 }
 
@@ -679,7 +796,7 @@ export default function (pi: ExtensionAPI): void {
 		if (lastCtx?.hasUI) {
 			const failed = pool.keys.filter((k) => {
 				const u = usageMap.get(k.id);
-				return u?.invalid || (u?.error && !u.fiveHour && !u.weekly);
+				return u?.invalid || (u?.error && !u.fiveHour && !u.weekly && !u.monthly);
 			});
 			if (failed.length === 0) {
 				lastCtx.ui.notify("API keys的状态刷新完成！", "info");
@@ -745,20 +862,6 @@ export default function (pi: ExtensionAPI): void {
 
 	// ── 状态栏渲染 ────────────────────────────────────────────
 
-	function usageText(u: KeyUsage | undefined): { five: string; week: string; bad: boolean; exhausted: boolean } {
-		if (!u) return { five: "5h:  — ", week: "7d:  — ", bad: false, exhausted: false };
-		if (u.invalid) return { five: "5h:无效key", week: "7d:无效key", bad: true, exhausted: false };
-		if (u.error && !u.fiveHour && !u.weekly)
-			return { five: "5h:查询失败", week: "7d:查询失败", bad: true, exhausted: false };
-		const fmtWin = (w?: WindowUsage) => {
-			if (!w) return "  — ";
-			const cd = fmtCountdown(w.resetsAt);
-			return cd ? `${fmtPct(w.pct)} ${cd}` : fmtPct(w.pct);
-		};
-		const exhausted = (u.fiveHour?.pct ?? 0) >= 100 || (u.weekly?.pct ?? 0) >= 100;
-		return { five: `5h:${fmtWin(u.fiveHour)}`, week: `7d:${fmtWin(u.weekly)}`, bad: false, exhausted };
-	}
-
 	function render(): void {
 		const ctx = lastCtx;
 		if (!ctx?.hasUI) return;
@@ -776,17 +879,12 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			const u = usageMap.get(activeKey.id);
-			const t = usageText(u);
-			const paint = (txt: string, pct?: number) => {
-				if (t.bad) return theme.fg("error", txt);
-				if (pct !== undefined && pct >= CRIT_PCT) return theme.fg("error", txt);
-				if (pct !== undefined && pct >= WARN_PCT) return theme.fg("warning", txt);
-				return theme.fg("dim", txt);
-			};
-			const five = paint(t.five, u?.fiveHour?.pct);
-			const week = paint(t.week, u?.weekly?.pct);
-			const tag = t.exhausted ? theme.fg("error", " ⛔已达限额") : "";
-			ctx.ui.setStatus(STATUS_ID, `${theme.fg("dim", "当前用量")} ${five} ${week}${tag}`);
+			const content = kimiStatusContent(u);
+			const windows = content.windows
+				.map((w) => theme.fg(w.level === "crit" ? "error" : w.level === "warn" ? "warning" : "dim", w.text))
+				.join(" ");
+			const tag = content.exhausted ? theme.fg("error", " ⛔已达限额") : "";
+			ctx.ui.setStatus(STATUS_ID, `${theme.fg("dim", "当前用量")} ${windows}${tag}`);
 			return;
 		}
 
@@ -863,18 +961,7 @@ export default function (pi: ExtensionAPI): void {
 
 		pool.keys.forEach((k, i) => {
 			const active = k.id === activeId;
-			const t = usageText(usageMap.get(k.id));
-			const parts = [
-				`${i + 1}.`,
-				active ? "●" : "○",
-				padEnd(k.label, labelWidth),
-				t.five.padEnd(14),
-				t.week.padEnd(14),
-			];
-			if (active) parts.push("← 当前生效");
-			else if (t.exhausted) parts.push("已达限额");
-			else if (t.bad) parts.push("");
-			options.push(parts.join(" ").trimEnd());
+			options.push(kimiKeyOptionText(i, k.label, labelWidth, active, usageMap.get(k.id)));
 			keyIds.push(k.id);
 		});
 

@@ -5,7 +5,7 @@
 ## 功能
 
 - 状态栏跟随当前模型自动切换：
-  - Kimi 模型 → `当前用量 5h: 23% 2h10m 7d: 45% 3d2h`（≥80% 黄，≥95% 红，100% ⛔）
+  - Kimi 模型 → 旧套餐显示 `当前用量 5h: 23% 2h10m 7d: 45% 3d2h`；新套餐按接口返回显示 `当前用量 5h: 23% 2h10m 月: 8% 20d3h`（≥80% 黄，≥95% 红，100% ⛔；不存在的窗口不显示）
   - DeepSeek 模型 → `deepseek开放平台余额 ¥8.66`（<10 黄，<5 / 不可用 / key 无效红）
   - Token Plan 模型（provider 为 `qwen-token-plan-cn` 或 baseUrl 含 `token-plan.`）→ `当前席位余额 18,432 Credits 12d3h后重置`（按已用百分比着色：≥80% 黄，≥95% 红，100% ⛔）
   - 其他模型 → 不显示
@@ -15,6 +15,16 @@
   - 第 3 页 Token Plan 坐席：我的坐席 Credits 明细（已用/剩余/周期止），支持配置 AccessKey、绑定/换绑坐席、查看 AK 明文、刷新
 - 键位：`↑↓`/`jk` 移动 · `←→`/`hl` 翻页 · `Enter` 选择 · `Esc` 退出
 - 当前启用项每 3 分钟自动刷新
+
+## Kimi 数据源与套餐兼容
+
+- 查询接口：`GET https://api.kimi.com/coding/v1/usages`，5h/7d/月度来自同一次请求。
+- 旧套餐：继续优先使用 `limits[].detail`（5h）和顶层 `usage`（7d），保持原计数口径。
+- 比例兜底：旧字段缺失时读取 `usages.limit_5h` / `usages.limit_7d` 的 `used_ratio` 与 `reset_time`。
+- 新套餐月度：读取 `usages.limit_month_total`；`limit_month_code` 是 Code 消耗子项，不冒充月度总量。
+- 窗口按实际数据渲染：旧套餐通常为 5h/7d，新套餐通常为 5h/月；不显示空窗口。
+- 不接入网页会员接口，不收集网页 Token / Cookie，因此不为接口未返回月度的旧套餐补查网页月度数据。
+- 新套餐真实账号仍需在购入后做一次实机联调。
 
 ## 安装
 
