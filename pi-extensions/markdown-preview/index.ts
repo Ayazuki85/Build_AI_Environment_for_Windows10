@@ -311,11 +311,6 @@ function headingMarker(theme: BeautifyMarkdownTheme, level: number): string {
   }
 }
 
-/** Visible width without ANSI escape sequences. */
-function stripAnsi(text: string): string {
-  return text.replace(/\u001b\[[0-9;]*m/g, "");
-}
-
 /**
  * Decorative underline under H1 / H2.
  * Uses heading color (not dim hr) so the rule actually stands out on dark themes.
@@ -362,7 +357,7 @@ function renderHeadingTokenNatural(
   const titleLine = `${indent}${marker}${headingText}`;
   const lines: string[] = [titleLine];
 
-  const titleVisibleWidth = stripAnsi(`${marker}${headingText}`).length;
+  const titleVisibleWidth = visibleWidth(`${marker}${headingText}`);
   const rule = headingRule(
     instance.theme,
     headingLevel,
