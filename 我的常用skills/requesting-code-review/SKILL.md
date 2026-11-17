@@ -7,19 +7,21 @@ description: 在完成任务、实现重大功能或合并之前使用，用于�
 
 Dispatch a code reviewer subagent to catch issues before they cascade. The reviewer gets precisely crafted context for evaluation — never your session's history. This keeps the reviewer focused on the work product, not your thought process, and preserves your own context for continued work.
 
-**Core principle:** Review early, review often.
+**Core principle:** Review at the appropriate workflow boundary. Do not repeat independent review of the same unchanged diff.
 
 ## When to Request Review
 
 **Mandatory:**
-- After each task in subagent-driven development
-- After completing major feature
-- Before merge to main
+- At the final whole-branch review stage in subagent-driven development; that stage is owned by the SDD workflow
+- After completing a major feature when no existing review covers the current diff
+- Before merge to main when no existing review covers the current BASE..HEAD range
 
 **Optional but valuable:**
 - When stuck (fresh perspective)
 - Before refactoring (baseline check)
 - After fixing complex bug
+
+A review satisfies every applicable trigger for the same unchanged BASE..HEAD range. Do not dispatch another reviewer merely because the feature is also complete or ready to merge. Code changes require verification and review of the new diff; a re-review after fixes belongs to the existing review stage.
 
 ## How to Request
 
@@ -42,6 +44,7 @@ Dispatch a locally registered `reviewer` subagent, filling the template at [code
 - `{PLAN_OR_REQUIREMENTS}` - What it should do
 - `{BASE_SHA}` - Starting commit
 - `{HEAD_SHA}` - Ending commit
+- `{TEST_EVIDENCE}` - Verification report paths or test evidence, including the tested HEAD SHA when available
 
 **3. Act on feedback:**
 - Fix Critical issues immediately
@@ -52,49 +55,52 @@ Dispatch a locally registered `reviewer` subagent, filling the template at [code
 ## Example
 
 ```
-[Just completed Task 2: Add verification function]
+[All tasks in the deployment plan are complete]
+[Focused tests pass; the controller ran the full suite on HEAD and wrote a verification report]
 
-You: Let me request code review before proceeding.
+You: Let me request the final whole-branch review.
 
-BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print $1}')
+BASE_SHA=$(git merge-base main HEAD)
 HEAD_SHA=$(git rev-parse HEAD)
 
 [Dispatch code reviewer subagent]
-  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types
-  PLAN_OR_REQUIREMENTS: Task 2 from docs/superpowers/plans/deployment-plan.md
+  DESCRIPTION: Completed the deployment plan, including verification and recovery modes
+  PLAN_OR_REQUIREMENTS: docs/superpowers/plans/deployment-plan.md
   BASE_SHA: a7981ec
   HEAD_SHA: 3df7661
+  TEST_EVIDENCE: .superpowers/sdd/final-verification-3df7661.md
 
 [Subagent returns]:
   Strengths: Clean architecture, real tests
   Issues:
     Important: Missing progress indicators
     Minor: Magic number (100) for reporting interval
-  Assessment: Ready to proceed
+  Assessment: Ready with fixes
 
-You: [Fix progress indicators]
-[Continue to Task 3]
+You: [Fix progress indicators and run covering tests]
+[Regenerate the whole-branch package and re-review the new HEAD as part of the same final review stage]
 ```
 
 ## Integration with Workflows
 
 **Subagent-Driven Development:**
-- Review after EACH task
-- Catch issues before they compound
-- Fix before moving to next task
+- The SDD controller owns one final whole-branch review after all tasks
+- Do not dispatch reviewers between tasks
+- Do not run another feature-completion or pre-merge review after the SDD final review unless the code has changed
 
 **Executing Plans:**
-- Review after each task or at natural checkpoints
-- Get feedback, apply, continue
+- Review at a natural milestone or after plan completion
+- Use one final review for the completed plan; re-review only after code changes
 
 **Ad-Hoc Development:**
-- Review before merge
+- Review before merge when no existing review covers the current diff
 - Review when stuck
 
 ## Red Flags
 
 **Never:**
 - Skip review because "it's simple"
+- Repeat independent review of the same unchanged diff under a different trigger
 - Ignore Critical issues
 - Proceed with unfixed Important issues
 - Argue with valid technical feedback

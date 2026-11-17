@@ -44,8 +44,10 @@ Subagent (general-purpose):
     **While you work:** If you encounter something unexpected or unclear, **ask questions**.
     It's always OK to pause and clarify. Don't guess or make assumptions.
 
-    While iterating, run the focused test for what you're changing; run the
-    full suite once before committing, not after every edit.
+    While iterating and before reporting, run the focused tests and relevant
+    integration tests for what you're changing. Do not run the full suite;
+    the controller owns final whole-branch verification unless it explicitly
+    delegates that verification to you for the current HEAD.
 
     ## Code Organization
 

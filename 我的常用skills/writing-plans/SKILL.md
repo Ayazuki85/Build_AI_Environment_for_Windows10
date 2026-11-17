@@ -35,12 +35,11 @@ This structure informs the task decomposition. Each task should produce self-con
 
 ## Task Right-Sizing
 
-A task is the smallest unit that carries its own test cycle and is worth a
-fresh reviewer's gate. When drawing task boundaries: fold setup,
-configuration, scaffolding, and documentation steps into the task whose
-deliverable needs them; split only where a reviewer could meaningfully
-reject one task while approving its neighbor. Each task ends with an
-independently testable deliverable.
+A task is the smallest unit that carries its own focused test cycle and
+produces an independently testable deliverable. When drawing task boundaries:
+fold setup, configuration, scaffolding, and documentation steps into the task
+whose deliverable needs them; split only where one task could be accepted or
+rejected independently of its neighbor.
 
 ## Bite-Sized Task Granularity
 
@@ -139,6 +138,9 @@ Every step must contain the actual content an engineer needs. These are **plan f
 - Exact file paths always
 - Complete code in every step — if a step changes code, show the code
 - Exact commands with expected output
+- Assign focused tests to individual tasks; reserve the full verification
+  suite for plan completion or a designated integration milestone unless a
+  task changes shared high-risk infrastructure
 - DRY, YAGNI, TDD, frequent commits
 
 ## Self-Review
@@ -159,16 +161,16 @@ After saving the plan, offer execution choice:
 
 **"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Two execution options:**
 
-**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
+**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, with implementer self-review and one final whole-branch review
 
-**2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
+**2. Inline Execution** - Execute tasks in this session using executing-plans, with focused verification and a final review
 
 **Which approach?"**
 
 **If Subagent-Driven chosen:**
 - **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development
-- Fresh subagent per task + two-stage review
+- Fresh subagent per task + implementer self-review + one final whole-branch review
 
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
-- Batch execution with checkpoints for review
+- Batch execution with focused verification and a final review

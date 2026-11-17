@@ -5,11 +5,11 @@ description: 在当前会话中执行实施计划、且各任务相互独立可�
 
 # Subagent-Driven Development
 
-Execute plan by dispatching a fresh implementer subagent per task. Each implementer implements, tests, commits, and self-reviews. After all tasks are complete, dispatch one broad whole-branch review.
+Execute plan by dispatching a fresh implementer subagent per task. Each implementer implements, runs focused tests, commits, and self-reviews. After all tasks are complete, the controller runs final verification and dispatches one broad whole-branch review.
 
 **Why subagents:** You delegate tasks to specialized agents with isolated context. By precisely crafting their instructions and context, you ensure they stay focused and succeed at their task. They should never inherit your session's context or history — you construct exactly what they need. This also preserves your own context for coordination work.
 
-**Core principle:** Fresh subagent per task + implementer self-review + broad final review = low overhead with a final quality gate
+**Core principle:** Fresh subagent per task + implementer self-review + controller-run final verification + broad final review = low overhead with a final quality gate
 
 **Narration:** between tool calls, narrate at most one short line — the
 ledger and the tool results carry the record.
@@ -61,6 +61,7 @@ digraph process {
 
     "Read plan, note context and global constraints, create todos" [shape=box];
     "More tasks remain?" [shape=diamond];
+    "Run full verification once on current HEAD; write verification report" [shape=box];
     "Generate whole-branch package; dispatch final code reviewer (../requesting-code-review/code-reviewer.md)" [shape=box];
     "Final review has findings?" [shape=diamond];
     "Dispatch ONE fix subagent with complete findings list; run covering tests" [shape=box];
@@ -76,7 +77,8 @@ digraph process {
     "Handle implementer status and resolve blocking concerns" -> "Mark task complete in todo list and progress ledger";
     "Mark task complete in todo list and progress ledger" -> "More tasks remain?";
     "More tasks remain?" -> "Extract task brief and dispatch implementer subagent (./implementer-prompt.md)" [label="yes"];
-    "More tasks remain?" -> "Generate whole-branch package; dispatch final code reviewer (../requesting-code-review/code-reviewer.md)" [label="no"];
+    "More tasks remain?" -> "Run full verification once on current HEAD; write verification report" [label="no"];
+    "Run full verification once on current HEAD; write verification report" -> "Generate whole-branch package; dispatch final code reviewer (../requesting-code-review/code-reviewer.md)";
     "Generate whole-branch package; dispatch final code reviewer (../requesting-code-review/code-reviewer.md)" -> "Final review has findings?";
     "Final review has findings?" -> "Dispatch ONE fix subagent with complete findings list; run covering tests" [label="yes"];
     "Dispatch ONE fix subagent with complete findings list; run covering tests" -> "Regenerate whole-branch package and re-review";
@@ -152,32 +154,49 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 
 ## Final Whole-Branch Review
 
-After every task is complete, run exactly one final review stage across the
-whole branch:
+After every task is complete, the controller performs final verification and
+then runs exactly one final review stage across the whole branch:
 
+- Record the current HEAD and run the full verification suite once on that
+  HEAD. Implementers do not each run the full suite. If the ledger already
+  names a passing final-verification report for this exact HEAD, reuse it.
+- Save the command, relevant output, result, and tested HEAD SHA in a uniquely
+  named final-verification report under `.superpowers/sdd/`.
+- If final verification fails, do not dispatch the reviewer as though the HEAD
+  were verified. Dispatch ONE fix subagent with the failure report; after its
+  covering tests pass, run the full suite on the new HEAD and update the report
+  and ledger. Proceed to review only after final verification passes.
 - Run `scripts/review-package MERGE_BASE HEAD`, where `MERGE_BASE` is the
   commit the branch started from (for example, `git merge-base main HEAD`).
   Pass the printed path to the final reviewer.
 - Dispatch the final reviewer using
   `../requesting-code-review/code-reviewer.md`, the plan or requirements, the
-  review-package path, the global constraints, and any non-blocking concerns
-  recorded in the ledger.
+  review-package path, the final-verification report path, the global
+  constraints, and any non-blocking concerns recorded in the ledger.
 - The final reviewer checks both whole-plan compliance and code quality
-  across the complete branch diff. Do not ask it to re-run tests the
-  implementers already ran on unchanged code; use their reports as test
-  evidence and request new tests only for concrete gaps or fixes.
+  across the complete branch diff. It uses the supplied final-verification
+  and implementer reports as test evidence. Do not ask it to re-run tests on
+  unchanged code; request new targeted tests only for concrete gaps or fixes.
 - Do not pre-judge findings. Never tell the reviewer what not to flag or
   assign a maximum severity before it has inspected the code.
 - If a finding conflicts with explicit plan text, present both to the human
   and ask which governs before dispatching a fix.
 - If the final review returns findings, dispatch ONE fix subagent with the
   complete findings list — not one fixer per finding. Name the covering test
-  files and require the command run, relevant output, and changed files in
-  the fix report.
+  files and require the command run, relevant output, changed files, and new
+  HEAD SHA in the fix report.
+- After a fix changes HEAD, earlier full-suite results remain evidence only
+  for the SHA they tested. Run covering tests on the new HEAD; rerun the full
+  suite only for a concrete cross-cutting risk or an explicit plan requirement.
 - Regenerate the whole-branch review package after fixes and re-review.
   Repeat the final fix wave until no unresolved Critical or Important
   findings remain. Record Minor findings in the final report rather than
   silently discarding them.
+
+This is the workflow's only independent code-review stage. It also satisfies
+feature-completion and pre-merge review when it covers the same unchanged
+BASE..HEAD range. Do not invoke requesting-code-review again afterward for
+that range. Re-reviews required by code fixes belong to this same stage.
 
 ## File Handoffs
 
@@ -202,13 +221,13 @@ and is re-read on every later turn. Hand artifacts over as files:
   returns only status, commits, a one-line test summary, self-review
   result, and concerns.
 - **Final reviewer inputs:** the final reviewer gets the whole-branch
-  review-package path, the plan or requirements path, binding global
-  constraints, and the ledger's non-blocking concerns. Do not paste every
-  task report into its dispatch.
-- **Final fix report:** a fix subagent writes its changes and covering test
-  evidence to a uniquely named final-fix report. Append that report path to
-  the ledger and pass it to the final re-review along with the regenerated
-  whole-branch package.
+  review-package path, the plan or requirements path, the final-verification
+  report path, binding global constraints, and the ledger's non-blocking
+  concerns. Do not paste every task report into its dispatch.
+- **Final fix report:** a fix subagent writes its changes, new HEAD SHA, and
+  covering test evidence to a uniquely named final-fix report. Append that
+  report path to the ledger and pass it to the final re-review along with the
+  regenerated whole-branch package.
 
 A dispatch prompt describes one task, not the session's history. Do not paste
 accumulated prior-task summaries into later dispatches. A fresh implementer
@@ -230,6 +249,9 @@ a ledger file, not only in todos.
   self-review is done, and no blocking concerns remain, append one line to
   the ledger in the same message as your other bookkeeping:
   `Task N: complete (commits <base7>..<head7>, tests passed, self-reviewed)`.
+- After final verification, append one line:
+  `Final verification: PASS at <head7> (report <path>)`. On resume, reuse it
+  only when the current HEAD exactly matches; otherwise verify the new HEAD.
 - Record non-blocking concerns separately and point the final whole-branch
   review at them so they are assessed rather than silently discarded.
 - The ledger is your recovery map: the commits it names exist in git even
@@ -284,7 +306,8 @@ Implementer:
 ...
 
 [After all tasks]
-[Run review-package MERGE_BASE HEAD; dispatch final code-reviewer]
+[Run the full suite once on current HEAD; write the final-verification report]
+[Run review-package MERGE_BASE HEAD; dispatch final code-reviewer with the verification report]
 Final reviewer: All requirements met, ready to merge
 
 Done!
@@ -315,7 +338,8 @@ requires six dispatches: five implementers and one final reviewer.
 
 **Quality gates:**
 - Self-review catches issues before task completion
-- Test evidence and commits are required in every implementer report
+- Focused test evidence and commits are required in every implementer report
+- Controller-run full verification checks the integrated HEAD once
 - Final review checks whole-plan compliance and code quality together
 - Final fix waves ensure cross-task and integration issues are addressed
 
@@ -334,7 +358,9 @@ requires six dispatches: five implementers and one final reviewer.
   final whole-branch review and its re-reviews
 - Treat implementer self-review as a substitute for the required final
   whole-branch review
-- Mark a task complete without commits, test evidence, and self-review
+- Mark a task complete without commits, focused test evidence, and self-review
+- Make every implementer run the full suite; the controller owns final verification
+- Present a full-suite result from an old HEAD as evidence for a fixed HEAD
 - Proceed with unresolved correctness or scope concerns
 - Dispatch multiple implementation subagents in parallel (conflicts)
 - Make a subagent read the whole plan file (hand it its task brief —

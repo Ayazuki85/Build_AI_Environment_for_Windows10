@@ -30,6 +30,11 @@ Subagent (reviewer):
     git diff [BASE_SHA]..[HEAD_SHA]
     ```
 
+    ## Verification Evidence
+
+    [TEST_REPORT_OR_TEST_EVIDENCE — paths or supplied commands, results, and
+    tested HEAD SHA. If no evidence is supplied, say what is missing.]
+
     ## Read-Only Review
 
     Your review is read-only on this checkout. Do not mutate the working tree, the index, HEAD, or branch state in any way. Use tools like `git show`, `git diff`, and `git log` to inspect history. If you need a working copy of a different revision, check it out into a separate temporary directory (e.g. `git worktree add /tmp/review-[SHA] [SHA]`) — never move HEAD on this checkout.
@@ -58,7 +63,8 @@ Subagent (reviewer):
     - Tests verify real behavior, not mocks?
     - Edge cases covered?
     - Integration tests where they matter?
-    - All tests passing?
+    - Is adequate test evidence supplied for the reviewed HEAD?
+    - Are there concrete test gaps that require new targeted verification?
 
     **Production readiness:**
     - Migration strategy if schema changed?
@@ -116,11 +122,14 @@ Subagent (reviewer):
     - Explain WHY each issue matters
     - Acknowledge strengths
     - Give a clear verdict
+    - Use supplied test evidence for unchanged code; request or run new
+      targeted checks only for a concrete uncovered risk or fix
 
     **DON'T:**
     - Say "looks good" without checking
     - Mark nitpicks as Critical
     - Give feedback on code you didn't actually read
+    - Rerun the full suite or repeat tests already run on the reviewed HEAD
     - Be vague ("improve error handling")
     - Avoid giving a clear verdict
 ```
@@ -130,6 +139,8 @@ Subagent (reviewer):
 - `[PLAN_OR_REQUIREMENTS]` — what it should do (plan file path, task text, or requirements)
 - `[BASE_SHA]` — starting commit
 - `[HEAD_SHA]` — ending commit
+- `[TEST_REPORT_OR_TEST_EVIDENCE]` — verification report paths or test evidence,
+  including the tested HEAD SHA when available
 
 **Reviewer returns:** Strengths, Issues (Critical / Important / Minor), Recommendations, Assessment
 
