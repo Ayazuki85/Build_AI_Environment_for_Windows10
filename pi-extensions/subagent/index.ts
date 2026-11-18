@@ -22,6 +22,12 @@
  *    unless the model override carries a ":level" suffix. (Upstream dropped
  *    thinking whenever an agent pinned a model.)
  * 3. Usage line renders "model:thinking" via formatModelWithThinking().
+ * 4. Persistent child sessions with parentSession lineage, lightweight parent indexes,
+ *    live JSON transcript reconstruction, and a fullscreen read-only viewer.
+ * 5. Chinese user-facing UI and extension-generated messages; tool schemas,
+ *    internal protocol values, and model-facing instructions remain English.
+ *
+ * agents.ts remains upstream-aligned unless intentionally changed.
  *
  * Sync after pi upgrades: locate the global npm root with `npm root -g`, diff against
  *   <npm-root>/@earendil-works/pi-coding-agent/examples/extensions/subagent/index.ts
@@ -29,24 +35,36 @@
  * 1.5.0 sync: use formatReadLineRange() for numeric-string/null read ranges.
  */
 
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Message } from "@earendil-works/pi-ai";
+import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
-	formatReadLineRange,
+	type ExtensionContext,
 	getAgentDir,
 	getMarkdownTheme,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Markdown, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { getPiInvocation, persistentJsonArgs, runJsonChild } from "./child-process.ts";
+import { formatAgentScope, formatAgentSource, formatStatus, formatStopReason } from "./localization.ts";
+import {
+	CHILD_INDEX_TYPE,
+	type ChildIndexPayload,
+	ChildSessionStore,
+	type ChildSessionRef,
+	foldChildIndexes,
+	resolveResultChild,
+	type SessionStorage,
+	toDetailsResult,
+} from "./child-session.ts";
+import { PiSessionStorage } from "./session-storage.ts";
+import { formatToolCall, ViewerController } from "./viewer.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -73,82 +91,17 @@ function formatUsageStats(
 	model?: string,
 ): string {
 	const parts: string[] = [];
-	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
-	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
-	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
-	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
-	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
+	if (usage.turns) parts.push(`${usage.turns} 轮`);
+	if (usage.input) parts.push(`输入 ↑${formatTokens(usage.input)}`);
+	if (usage.output) parts.push(`输出 ↓${formatTokens(usage.output)}`);
+	if (usage.cacheRead) parts.push(`缓存读 ${formatTokens(usage.cacheRead)}`);
+	if (usage.cacheWrite) parts.push(`缓存写 ${formatTokens(usage.cacheWrite)}`);
 	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
 	if (usage.contextTokens && usage.contextTokens > 0) {
-		parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
+		parts.push(`上下文:${formatTokens(usage.contextTokens)}`);
 	}
 	if (model) parts.push(model);
 	return parts.join(" ");
-}
-
-function formatToolCall(
-	toolName: string,
-	args: Record<string, unknown>,
-	themeFg: (color: any, text: string) => string,
-): string {
-	const shortenPath = (p: string) => {
-		const home = os.homedir();
-		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-	};
-
-	switch (toolName) {
-		case "bash": {
-			const command = (args.command as string) || "...";
-			const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
-			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
-		}
-		case "read": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenPath(rawPath);
-			const lineRange = formatReadLineRange(args.offset, args.limit);
-			let text = themeFg("accent", filePath);
-			if (lineRange) {
-				text += themeFg("warning", lineRange);
-			}
-			return themeFg("muted", "read ") + text;
-		}
-		case "write": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenPath(rawPath);
-			const content = (args.content || "") as string;
-			const lines = content.split("\n").length;
-			let text = themeFg("muted", "write ") + themeFg("accent", filePath);
-			if (lines > 1) text += themeFg("dim", ` (${lines} lines)`);
-			return text;
-		}
-		case "edit": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			return themeFg("muted", "edit ") + themeFg("accent", shortenPath(rawPath));
-		}
-		case "ls": {
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "ls ") + themeFg("accent", shortenPath(rawPath));
-		}
-		case "find": {
-			const pattern = (args.pattern || "*") as string;
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "find ") + themeFg("accent", pattern) + themeFg("dim", ` in ${shortenPath(rawPath)}`);
-		}
-		case "grep": {
-			const pattern = (args.pattern || "") as string;
-			const rawPath = (args.path || ".") as string;
-			return (
-				themeFg("muted", "grep ") +
-				themeFg("accent", `/${pattern}/`) +
-				themeFg("dim", ` in ${shortenPath(rawPath)}`)
-			);
-		}
-		default: {
-			const argsStr = JSON.stringify(args);
-			const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
-			return themeFg("accent", toolName) + themeFg("dim", ` ${preview}`);
-		}
-	}
 }
 
 interface UsageStats {
@@ -174,7 +127,7 @@ interface SingleResult {
 	agentSource: "user" | "project" | "unknown";
 	task: string;
 	exitCode: number;
-	messages: Message[];
+	messages: AgentMessage[];
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
@@ -182,6 +135,7 @@ interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	child?: ChildSessionRef;
 }
 
 interface SubagentDetails {
@@ -191,7 +145,7 @@ interface SubagentDetails {
 	results: SingleResult[];
 }
 
-function getFinalOutput(messages: Message[]): string {
+function getFinalOutput(messages: AgentMessage[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
@@ -209,9 +163,9 @@ function isFailedResult(result: SingleResult): boolean {
 
 function getResultOutput(result: SingleResult): string {
 	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "（无输出）";
 	}
-	return getFinalOutput(result.messages) || "(no output)";
+	return getFinalOutput(result.messages) || "（无输出）";
 }
 
 function truncateParallelOutput(output: string): string {
@@ -222,12 +176,12 @@ function truncateParallelOutput(output: string): string {
 	while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) {
 		truncated = truncated.slice(0, -1);
 	}
-	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
+	return `${truncated}\n\n[输出已截断：省略 ${byteLength - Buffer.byteLength(truncated, "utf8")} 字节。完整输出可在关联的子代理会话中查看。]`;
 }
 
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
 
-function getDisplayItems(messages: Message[]): DisplayItem[] {
+function getDisplayItems(messages: AgentMessage[]): DisplayItem[] {
 	const items: DisplayItem[] = [];
 	for (const msg of messages) {
 		if (msg.role === "assistant") {
@@ -270,27 +224,17 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	return { dir: tmpDir, filePath };
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const currentScript = process.argv[1];
-	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...args] };
-	}
-
-	const execName = path.basename(process.execPath).toLowerCase();
-	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-	if (!isGenericRuntime) {
-		return { command: process.execPath, args };
-	}
-
-	return { command: "pi", args };
-}
-
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 interface DispatchDefaults {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
+}
+
+interface SubagentRuntime {
+	storage: SessionStorage;
+	children: ChildSessionStore;
+	appendIndex(payload: ChildIndexPayload, dispatchScope: string): void;
 }
 
 async function runSingleAgent(
@@ -301,6 +245,11 @@ async function runSingleAgent(
 	task: string,
 	cwd: string | undefined,
 	modelOverride: string | undefined,
+	toolCallId: string,
+	runtime: SubagentRuntime,
+	dispatchScope: string,
+	parentSession: string | undefined,
+	taskIndex: number | undefined,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
@@ -309,20 +258,19 @@ async function runSingleAgent(
 	const agent = agents.find((a) => a.name === agentName);
 
 	if (!agent) {
-		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
+		const available = agents.map((a) => `"${a.name}"`).join(", ") || "无";
 		return {
 			agent: agentName,
 			agentSource: "unknown",
 			task,
 			exitCode: 1,
 			messages: [],
-			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
+			stderr: `未知子代理："${agentName}"。可用子代理：${available}。`,
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 			step,
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	// Alignment rule (custom): the child always runs the dispatching session's current
 	// model and thinking level unless explicitly overridden by the `model` tool param
 	// (or an agent frontmatter pin). A ":level" suffix on the override carries thinking.
@@ -336,12 +284,49 @@ async function runSingleAgent(
 	} else {
 		modelArg = dispatchDefaults.model;
 	}
-	if (modelArg) args.push("--model", modelArg);
-	if (thinkingArg) args.push("--thinking", thinkingArg);
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+
+	const runId = step !== undefined
+		? `${toolCallId}:step:${step}`
+		: taskIndex !== undefined
+			? `${toolCallId}:task:${taskIndex}`
+			: toolCallId;
+	const childCwd = cwd ?? defaultCwd;
+	let created: ReturnType<SessionStorage["create"]>;
+	try {
+		created = runtime.storage.create({ cwd: childCwd, parentSession });
+	} catch (error) {
+		return {
+			agent: agentName,
+			agentSource: agent.source,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: error instanceof Error ? error.message : String(error),
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model: modelArg,
+			thinking: thinkingArg,
+			step,
+		};
+	}
+	const child: ChildSessionRef = {
+		runId,
+		toolCallId,
+		sessionId: created.sessionId,
+		sessionFile: created.sessionFile,
+		agent: agent.name,
+		description: task.split(/\s+/).slice(0, 8).join(" ") || agent.name,
+		model: modelArg,
+		thinking: thinkingArg,
+		taskIndex,
+		step,
+	};
+	runtime.children.start(child, dispatchScope);
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let terminalIndexAttempted = false;
+	let settlementError: unknown;
+	let hasSettlementError = false;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -354,18 +339,25 @@ async function runSingleAgent(
 		model: modelArg,
 		thinking: thinkingArg,
 		step,
+		child,
 	};
 
 	const emitUpdate = () => {
 		if (onUpdate) {
 			onUpdate({
-				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
+				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "（运行中…）" }],
 				details: makeDetails([currentResult]),
 			});
 		}
 	};
 
 	try {
+		runtime.appendIndex({ ...child, status: "running" }, dispatchScope);
+		const args = persistentJsonArgs({ sessionFile: child.sessionFile, sessionDir: runtime.storage.directory });
+		if (modelArg) args.push("--model", modelArg);
+		if (thinkingArg) args.push("--thinking", thinkingArg);
+		if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
@@ -374,90 +366,79 @@ async function runSingleAgent(
 		}
 
 		args.push(`Task: ${task}`);
-		let wasAborted = false;
-
-		const exitCode = await new Promise<number>((resolve) => {
-			const invocation = getPiInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, {
-				cwd: cwd ?? defaultCwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			let buffer = "";
-
-			const processLine = (line: string) => {
-				if (!line.trim()) return;
-				let event: any;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					return;
+		const result = await runJsonChild(getPiInvocation(args), {
+			cwd: childCwd,
+			signal,
+			onEvent: (event) => {
+				runtime.children.apply(runId, event, dispatchScope);
+				const record = runtime.children.get(runId, dispatchScope);
+				if (record) currentResult.messages = record.transcript.messages;
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					const message = event.message;
+					currentResult.usage.turns++;
+					currentResult.usage.input += message.usage.input || 0;
+					currentResult.usage.output += message.usage.output || 0;
+					currentResult.usage.cacheRead += message.usage.cacheRead || 0;
+					currentResult.usage.cacheWrite += message.usage.cacheWrite || 0;
+					currentResult.usage.cost += message.usage.cost?.total || 0;
+					currentResult.usage.contextTokens = message.usage.totalTokens || 0;
+					if (!currentResult.model && message.model) currentResult.model = message.model;
+					if (message.stopReason) currentResult.stopReason = message.stopReason;
+					if (message.errorMessage) currentResult.errorMessage = message.errorMessage;
 				}
-
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message as Message;
-					currentResult.messages.push(msg);
-
-					if (msg.role === "assistant") {
-						currentResult.usage.turns++;
-						const usage = msg.usage;
-						if (usage) {
-							currentResult.usage.input += usage.input || 0;
-							currentResult.usage.output += usage.output || 0;
-							currentResult.usage.cacheRead += usage.cacheRead || 0;
-							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-							currentResult.usage.cost += usage.cost?.total || 0;
-							currentResult.usage.contextTokens = usage.totalTokens || 0;
-						}
-						if (!currentResult.model && msg.model) currentResult.model = msg.model;
-						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
-					}
-					emitUpdate();
-				}
-
-				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
-					emitUpdate();
-				}
-			};
-
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
-			});
-
-			proc.stderr.on("data", (data) => {
-				currentResult.stderr += data.toString();
-			});
-
-			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
-			});
-
-			proc.on("error", () => {
-				resolve(1);
-			});
-
-			if (signal) {
-				const killProc = () => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
-				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
-			}
+				emitUpdate();
+			},
 		});
 
-		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new Error("Subagent was aborted");
+		currentResult.exitCode = result.exitCode;
+		currentResult.stderr = result.stderr;
+		const status = result.aborted
+			? "aborted"
+			: result.exitCode !== 0 || currentResult.stopReason === "error"
+				? "failed"
+				: "completed";
+		try {
+			runtime.children.finish(runId, status, (currentResult.errorMessage ?? result.stderr) || undefined, dispatchScope);
+		} catch (error) {
+			settlementError = error;
+			hasSettlementError = true;
+		}
+		try {
+			terminalIndexAttempted = true;
+			runtime.appendIndex({ ...child, status }, dispatchScope);
+		} catch (error) {
+			if (!hasSettlementError) {
+				settlementError = error;
+				hasSettlementError = true;
+			}
+		}
+		if (result.aborted) throw new Error("子代理已中止");
+		if (hasSettlementError) throw settlementError;
 		return currentResult;
+	} catch (error) {
+		const record = runtime.children.get(runId, dispatchScope);
+		if (record?.status === "running") {
+			const status = signal?.aborted ? "aborted" : "failed";
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			try {
+				runtime.children.finish(runId, status, errorMessage || undefined, dispatchScope);
+			} catch {
+				/* Preserve the original execution error if settlement itself fails. */
+			}
+		}
+		if (!terminalIndexAttempted) {
+			const settledRecord = runtime.children.get(runId, dispatchScope);
+			const status = settledRecord && settledRecord.status !== "running"
+				? settledRecord.status
+				: signal?.aborted ? "aborted" : "failed";
+			terminalIndexAttempted = true;
+			try {
+				runtime.appendIndex({ ...child, status }, dispatchScope);
+			} catch {
+				/* Terminal persistence is best effort and must not mask the original error. */
+			}
+		}
+		throw error;
 	} finally {
 		if (tmpPromptPath)
 			try {
@@ -522,9 +503,103 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	const storage = new PiSessionStorage();
+	const children = new ChildSessionStore();
+	const viewer = new ViewerController(children);
+	const pendingIndexes = new Map<string, ChildIndexPayload[]>();
+	let activeParentScope: string | undefined;
+	const appendIndex = (payload: ChildIndexPayload, dispatchScope: string): void => {
+		if (activeParentScope === dispatchScope) {
+			pi.appendEntry(CHILD_INDEX_TYPE, payload);
+			return;
+		}
+		const pending = pendingIndexes.get(dispatchScope) ?? [];
+		pending.push(payload);
+		pendingIndexes.set(dispatchScope, pending);
+	};
+	const flushPendingIndexes = (scope: string, ctx: ExtensionContext): void => {
+		const pending = pendingIndexes.get(scope);
+		if (!pending || pending.length === 0) return;
+		let flushError: unknown;
+		let hasFlushError = false;
+		while (pending.length > 0) {
+			try {
+				pi.appendEntry(CHILD_INDEX_TYPE, pending[0]!);
+				pending.shift();
+			} catch (error) {
+				flushError = error;
+				hasFlushError = true;
+				break;
+			}
+		}
+		if (pending.length === 0) pendingIndexes.delete(scope);
+		if (hasFlushError) {
+			const message = flushError instanceof Error ? flushError.message : String(flushError);
+			ctx.ui.notify(
+				`无法将 ${pending.length} 条待处理的子代理索引写入当前父会话：${message}。这些索引仍保留在队列中，只会在当前父会话内重试。`,
+				"error",
+			);
+		}
+	};
+	const activateParent = (ctx: ExtensionContext): string => {
+		const scope = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();
+		activeParentScope = scope;
+		children.activate(scope);
+		flushPendingIndexes(scope, ctx);
+		return scope;
+	};
+	let currentContext: ExtensionContext | undefined;
+	const wrapChildLink = (component: Component, result: SingleResult): Component => {
+		const child = result.child;
+		if (!child) return component;
+		return new MouseRegion(component, (event) => {
+			if (event.type !== "click" || event.button !== "left" || event.alt || event.ctrl || event.shift) return undefined;
+			if (!currentContext) return undefined;
+			void viewer.open(child.runId, currentContext);
+			return { handled: true };
+		});
+	};
+	const runtime: SubagentRuntime = {
+		storage,
+		children,
+		appendIndex,
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		viewer.close();
+		const scope = activateParent(ctx);
+		currentContext = ctx;
+		children.restore(foldChildIndexes(ctx.sessionManager.getEntries()), storage, scope);
+	});
+
+	pi.on("session_shutdown", () => {
+		viewer.close();
+		activeParentScope = undefined;
+		currentContext = undefined;
+	});
+
+	pi.registerCommand("subagents", {
+		description: "查看子代理会话",
+		handler: async (_args, ctx) => {
+			const scope = activateParent(ctx);
+			const indexes = foldChildIndexes(ctx.sessionManager.getEntries());
+			children.restore(indexes, storage, scope);
+			const records = children.list(scope);
+			if (records.length === 0) {
+				ctx.ui.notify("暂无子代理会话", "info");
+				return;
+			}
+			const labels = records.map((record, index) => `${index + 1}. ${record.agent}: ${record.description} [${formatStatus(record.status)}]`);
+			const selected = await ctx.ui.select("子代理会话", labels);
+			if (selected === undefined) return;
+			const record = records[labels.indexOf(selected)];
+			if (record) await viewer.open(record.runId, ctx);
+		},
+	});
+
 	pi.registerTool({
 		name: "subagent",
-		label: "Subagent",
+		label: "子代理",
 		description: [
 			"Delegate tasks to specialized subagents with isolated context.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
@@ -534,8 +609,10 @@ export default function (pi: ExtensionAPI) {
 		].join(" "),
 		parameters: SubagentParams,
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const agentScope: AgentScope = params.agentScope ?? "user";
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const dispatchScope = activateParent(ctx);
+			const parentSession = ctx.sessionManager.getSessionFile();
+			const agentScope = (params.agentScope ?? "user") as AgentScope;
 			const dispatchDefaults: DispatchDefaults = {
 				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 				thinkingLevel: ctx.thinkingLevel,
@@ -555,16 +632,16 @@ export default function (pi: ExtensionAPI) {
 					mode,
 					agentScope,
 					projectAgentsDir: discovery.projectAgentsDir,
-					results,
+					results: results.map(toDetailsResult),
 				});
 
 			if (modeCount !== 1) {
-				const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+				const available = agents.map((a) => `${a.name}（${formatAgentSource(a.source)}）`).join("，") || "无";
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`,
+							text: `参数无效：必须且只能选择一种执行模式。\n可用子代理：${available}`,
 						},
 					],
 					details: makeDetails("single")([]),
@@ -588,14 +665,14 @@ export default function (pi: ExtensionAPI) {
 
 				if (projectAgentsRequested.length > 0) {
 					const names = projectAgentsRequested.map((a) => a.name).join(", ");
-					const dir = discovery.projectAgentsDir ?? "(unknown)";
+					const dir = discovery.projectAgentsDir ?? "（未知）";
 					const ok = await ctx.ui.confirm(
-						"Run project-local agents?",
-						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+						"运行项目级子代理？",
+						`子代理：${names}\n来源：${dir}\n\n项目级子代理由仓库控制。请仅在信任该仓库时继续。`,
 					);
 					if (!ok)
 						return {
-							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+							content: [{ type: "text", text: "已取消：未批准运行项目级子代理。" }],
 							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
 						};
 				}
@@ -632,6 +709,11 @@ export default function (pi: ExtensionAPI) {
 						taskWithContext,
 						step.cwd,
 						step.model,
+						toolCallId,
+						runtime,
+						dispatchScope,
+						parentSession,
+						undefined,
 						i + 1,
 						signal,
 						chainUpdate,
@@ -643,7 +725,7 @@ export default function (pi: ExtensionAPI) {
 					if (isError) {
 						const errorMsg = getResultOutput(result);
 						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+							content: [{ type: "text", text: `链式执行在第 ${i + 1} 步（${step.agent}）停止：${errorMsg}` }],
 							details: makeDetails("chain")(results),
 							isError: true,
 						};
@@ -651,7 +733,7 @@ export default function (pi: ExtensionAPI) {
 					previousOutput = getFinalOutput(result.messages);
 				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "（无输出）" }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -662,7 +744,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`,
+								text: `并行任务过多（${params.tasks.length} 个），最多允许 ${MAX_PARALLEL_TASKS} 个。`,
 							},
 						],
 						details: makeDetails("parallel")([]),
@@ -690,7 +772,7 @@ export default function (pi: ExtensionAPI) {
 						const done = allResults.filter((r) => r.exitCode !== -1).length;
 						onUpdate({
 							content: [
-								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` },
+								{ type: "text", text: `并行执行：已完成 ${done}/${allResults.length}，运行中 ${running}…` },
 							],
 							details: makeDetails("parallel")([...allResults]),
 						});
@@ -706,6 +788,11 @@ export default function (pi: ExtensionAPI) {
 						t.task,
 						t.cwd,
 						t.model,
+						toolCallId,
+						runtime,
+						dispatchScope,
+						parentSession,
+						index,
 						undefined,
 						signal,
 						// Per-task update callback
@@ -726,15 +813,15 @@ export default function (pi: ExtensionAPI) {
 				const summaries = results.map((r) => {
 					const output = truncateParallelOutput(getResultOutput(r));
 					const status = isFailedResult(r)
-						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
-						: "completed";
+						? `失败${r.stopReason && r.stopReason !== "end" ? `（${formatStopReason(r.stopReason)}）` : ""}`
+						: "已完成";
 					return `### [${r.agent}] ${status}\n\n${output}`;
 				});
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
+							text: `并行执行：成功 ${successCount}/${results.length}\n\n${summaries.join("\n\n---\n\n")}`,
 						},
 					],
 					details: makeDetails("parallel")(results),
@@ -750,6 +837,11 @@ export default function (pi: ExtensionAPI) {
 					params.task,
 					params.cwd,
 					params.model,
+					toolCallId,
+					runtime,
+					dispatchScope,
+					parentSession,
+					undefined,
 					undefined,
 					signal,
 					onUpdate,
@@ -759,31 +851,31 @@ export default function (pi: ExtensionAPI) {
 				if (isError) {
 					const errorMsg = getResultOutput(result);
 					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
+						content: [{ type: "text", text: `子代理执行失败${result.stopReason ? `（${formatStopReason(result.stopReason)}）` : ""}：${errorMsg}` }],
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
 				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [{ type: "text", text: getFinalOutput(result.messages) || "（无输出）" }],
 					details: makeDetails("single")([result]),
 				};
 			}
 
-			const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+			const available = agents.map((a) => `${a.name}（${formatAgentSource(a.source)}）`).join("，") || "无";
 			return {
-				content: [{ type: "text", text: `Invalid parameters. Available agents: ${available}` }],
+				content: [{ type: "text", text: `参数无效。可用子代理：${available}` }],
 				details: makeDetails("single")([]),
 			};
 		},
 
 		renderCall(args, theme, _context) {
-			const scope: AgentScope = args.agentScope ?? "user";
+			const scope = (args.agentScope ?? "user") as AgentScope;
 			if (args.chain && args.chain.length > 0) {
 				let text =
-					theme.fg("toolTitle", theme.bold("subagent ")) +
-					theme.fg("accent", `chain (${args.chain.length} steps)`) +
-					theme.fg("muted", ` [${scope}]`);
+					theme.fg("toolTitle", theme.bold("子代理 ")) +
+					theme.fg("accent", `链式执行（${args.chain.length} 个步骤）`) +
+					theme.fg("muted", ` [${formatAgentScope(scope)}]`);
 				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
 					const step = args.chain[i];
 					// Clean up {previous} placeholder for display
@@ -796,37 +888,53 @@ export default function (pi: ExtensionAPI) {
 						theme.fg("accent", step.agent) +
 						theme.fg("dim", ` ${preview}`);
 				}
-				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
+				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `… 另有 ${args.chain.length - 3} 项`)}`;
 				return new Text(text, 0, 0);
 			}
 			if (args.tasks && args.tasks.length > 0) {
 				let text =
-					theme.fg("toolTitle", theme.bold("subagent ")) +
-					theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
-					theme.fg("muted", ` [${scope}]`);
+					theme.fg("toolTitle", theme.bold("子代理 ")) +
+					theme.fg("accent", `并行执行（${args.tasks.length} 个任务）`) +
+					theme.fg("muted", ` [${formatAgentScope(scope)}]`);
 				for (const t of args.tasks.slice(0, 3)) {
 					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
 					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
 				}
-				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `… 另有 ${args.tasks.length - 3} 项`)}`;
 				return new Text(text, 0, 0);
 			}
 			const agentName = args.agent || "...";
 			const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
 			let text =
-				theme.fg("toolTitle", theme.bold("subagent ")) +
+				theme.fg("toolTitle", theme.bold("子代理 ")) +
 				theme.fg("accent", agentName) +
-				theme.fg("muted", ` [${scope}]`);
+				theme.fg("muted", ` [${formatAgentScope(scope)}]`);
 			text += `\n  ${theme.fg("dim", preview)}`;
 			return new Text(text, 0, 0);
 		},
 
 		renderResult(result, { expanded }, theme, _context) {
-			const details = result.details as SubagentDetails | undefined;
-			if (!details || details.results.length === 0) {
+			const persistedDetails = result.details as SubagentDetails | undefined;
+			if (!persistedDetails || persistedDetails.results.length === 0) {
 				const text = result.content[0];
-				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+				return new Text(text?.type === "text" ? text.text : "（无输出）", 0, 0);
 			}
+
+			const transcriptErrors = new Map<SingleResult, string>();
+			const details: SubagentDetails = {
+				...persistedDetails,
+				results: persistedDetails.results.map((r) => {
+					if (!r.child || r.messages.length > 0) return r;
+					const record = resolveResultChild(children, r);
+					if (!record) {
+						transcriptErrors.set(r, "子代理会话不可用");
+						return r;
+					}
+					const hydrated = { ...r, messages: record.transcript.messages };
+					if (record.error && record.transcript.messages.length === 0) transcriptErrors.set(hydrated, record.error);
+					return hydrated;
+				}),
+			};
 
 			const mdTheme = getMarkdownTheme();
 
@@ -834,7 +942,7 @@ export default function (pi: ExtensionAPI) {
 				const toShow = limit ? items.slice(-limit) : items;
 				const skipped = limit && items.length > limit ? items.length - limit : 0;
 				let text = "";
-				if (skipped > 0) text += theme.fg("muted", `... ${skipped} earlier items\n`);
+				if (skipped > 0) text += theme.fg("muted", `… 此前还有 ${skipped} 条记录\n`);
 				for (const item of toShow) {
 					if (item.type === "text") {
 						const preview = expanded ? item.text : item.text.split("\n").slice(0, 3).join("\n");
@@ -852,21 +960,23 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				const transcriptError = transcriptErrors.get(r);
 
 				if (expanded) {
 					const container = new Container();
-					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", `（${formatAgentSource(r.agentSource)}）`)}`;
+					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${formatStopReason(r.stopReason)}]`)}`;
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
-						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+						container.addChild(new Text(theme.fg("error", `错误：${r.errorMessage}`), 0, 0));
+					if (transcriptError) container.addChild(new Text(theme.fg("error", transcriptError), 0, 0));
 					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
+					container.addChild(new Text(theme.fg("muted", "─── 任务 ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
 					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-					if (displayItems.length === 0 && !finalOutput) {
-						container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
+					container.addChild(new Text(theme.fg("muted", "─── 输出 ───"), 0, 0));
+					if (displayItems.length === 0 && !finalOutput && !transcriptError) {
+						container.addChild(new Text(theme.fg("muted", "（无输出）"), 0, 0));
 					} else {
 						for (const item of displayItems) {
 							if (item.type === "toolCall")
@@ -888,20 +998,23 @@ export default function (pi: ExtensionAPI) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
 					}
-					return container;
+					return wrapChildLink(container, r);
 				}
 
-				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
-				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
+				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", `（${formatAgentSource(r.agentSource)}）`)}`;
+				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${formatStopReason(r.stopReason)}]`)}`;
+				if (isError && r.errorMessage) {
+					text += `\n${theme.fg("error", `错误：${r.errorMessage}`)}`;
+					if (transcriptError) text += `\n${theme.fg("error", transcriptError)}`;
+				} else if (transcriptError) text += `\n${theme.fg("error", transcriptError)}`;
+				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "（无输出）")}`;
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
-					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "（按 Ctrl+O 展开）")}`;
 				}
 				const usageStr = formatUsageStats(r.usage, formatModelWithThinking(r));
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
-				return new Text(text, 0, 0);
+				return wrapChildLink(new Text(text, 0, 0), r);
 			}
 
 			const aggregateUsage = (results: SingleResult[]) => {
@@ -927,8 +1040,8 @@ export default function (pi: ExtensionAPI) {
 						new Text(
 							icon +
 								" " +
-								theme.fg("toolTitle", theme.bold("chain ")) +
-								theme.fg("accent", `${successCount}/${details.results.length} steps`),
+								theme.fg("toolTitle", theme.bold("链式执行 ")) +
+								theme.fg("accent", `${successCount}/${details.results.length} 个步骤`),
 							0,
 							0,
 						),
@@ -938,21 +1051,23 @@ export default function (pi: ExtensionAPI) {
 						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
+						const transcriptError = transcriptErrors.get(r);
+						const row = new Container();
 
-						container.addChild(new Spacer(1));
-						container.addChild(
+						row.addChild(
 							new Text(
-								`${theme.fg("muted", `─── Step ${r.step}: `) + theme.fg("accent", r.agent)} ${rIcon}`,
+								`${theme.fg("muted", `─── 第 ${r.step} 步：`) + theme.fg("accent", r.agent)} ${rIcon}`,
 								0,
 								0,
 							),
 						);
-						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						row.addChild(new Text(theme.fg("muted", "任务：") + theme.fg("dim", r.task), 0, 0));
+						if (transcriptError) row.addChild(new Text(theme.fg("error", transcriptError), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
-								container.addChild(
+								row.addChild(
 									new Text(
 										theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
 										0,
@@ -964,39 +1079,74 @@ export default function (pi: ExtensionAPI) {
 
 						// Show final output as markdown
 						if (finalOutput) {
-							container.addChild(new Spacer(1));
-							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							row.addChild(new Spacer(1));
+							row.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
 						const stepUsage = formatUsageStats(r.usage, formatModelWithThinking(r));
-						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
+						if (stepUsage) row.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
+						container.addChild(new Spacer(1));
+						container.addChild(wrapChildLink(row, r));
 					}
 
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
 					if (usageStr) {
 						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
+						container.addChild(new Text(theme.fg("dim", `总计：${usageStr}`), 0, 0));
 					}
 					return container;
 				}
 
-				// Collapsed view
-				let text =
-					icon +
-					" " +
-					theme.fg("toolTitle", theme.bold("chain ")) +
-					theme.fg("accent", `${successCount}/${details.results.length} steps`);
+				// Preserve the original component for legacy results without child references.
+				if (!details.results.some((r) => r.child)) {
+					let text =
+						icon +
+						" " +
+						theme.fg("toolTitle", theme.bold("链式执行 ")) +
+						theme.fg("accent", `${successCount}/${details.results.length} 个步骤`);
+					for (const r of details.results) {
+						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const displayItems = getDisplayItems(r.messages);
+						text += `\n\n${theme.fg("muted", `─── 第 ${r.step} 步：`)}${theme.fg("accent", r.agent)} ${rIcon}`;
+						if (displayItems.length === 0) text += `\n${theme.fg("muted", "（无输出）")}`;
+						else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					}
+					const usageStr = formatUsageStats(aggregateUsage(details.results));
+					if (usageStr) text += `\n\n${theme.fg("dim", `总计：${usageStr}`)}`;
+					text += `\n${theme.fg("muted", "（按 Ctrl+O 展开）")}`;
+					return new Text(text, 0, 0);
+				}
+
+				const container = new Container();
+				container.addChild(new Text(
+					icon + " " + theme.fg("toolTitle", theme.bold("链式执行 ")) +
+					theme.fg("accent", `${successCount}/${details.results.length} 个步骤`),
+					0,
+					0,
+				));
 				for (const r of details.results) {
 					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
-					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
-					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					const transcriptError = transcriptErrors.get(r);
+					const row = new Container();
+					row.addChild(new Text(
+						`${theme.fg("muted", `─── 第 ${r.step} 步：`)}${theme.fg("accent", r.agent)} ${rIcon}`,
+						0,
+						0,
+					));
+					if (transcriptError) row.addChild(new Text(theme.fg("error", transcriptError), 0, 0));
+					if (displayItems.length === 0 && !transcriptError) row.addChild(new Text(theme.fg("muted", "（无输出）"), 0, 0));
+					else if (displayItems.length > 0) row.addChild(new Text(renderDisplayItems(displayItems, 5), 0, 0));
+					container.addChild(new Spacer(1));
+					container.addChild(wrapChildLink(row, r));
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results));
-				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
-				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
-				return new Text(text, 0, 0);
+				if (usageStr) {
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", `总计：${usageStr}`), 0, 0));
+				}
+				container.addChild(new Text(theme.fg("muted", "（按 Ctrl+O 展开）"), 0, 0));
+				return container;
 			}
 
 			if (details.mode === "parallel") {
@@ -1010,14 +1160,14 @@ export default function (pi: ExtensionAPI) {
 						? theme.fg("warning", "◐")
 						: theme.fg("success", "✓");
 				const status = isRunning
-					? `${successCount + failCount}/${details.results.length} done, ${running} running`
-					: `${successCount}/${details.results.length} tasks`;
+					? `已完成 ${successCount + failCount}/${details.results.length}，运行中 ${running}`
+					: `成功 ${successCount}/${details.results.length}`;
 
 				if (expanded && !isRunning) {
 					const container = new Container();
 					container.addChild(
 						new Text(
-							`${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`,
+							`${icon} ${theme.fg("toolTitle", theme.bold("并行执行 "))}${theme.fg("accent", status)}`,
 							0,
 							0,
 						),
@@ -1027,17 +1177,19 @@ export default function (pi: ExtensionAPI) {
 						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
+						const transcriptError = transcriptErrors.get(r);
+						const row = new Container();
 
-						container.addChild(new Spacer(1));
-						container.addChild(
+						row.addChild(
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
 						);
-						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						row.addChild(new Text(theme.fg("muted", "任务：") + theme.fg("dim", r.task), 0, 0));
+						if (transcriptError) row.addChild(new Text(theme.fg("error", transcriptError), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
-								container.addChild(
+								row.addChild(
 									new Text(
 										theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
 										0,
@@ -1049,24 +1201,54 @@ export default function (pi: ExtensionAPI) {
 
 						// Show final output as markdown
 						if (finalOutput) {
-							container.addChild(new Spacer(1));
-							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							row.addChild(new Spacer(1));
+							row.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
 						const taskUsage = formatUsageStats(r.usage, formatModelWithThinking(r));
-						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
+						if (taskUsage) row.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
+						container.addChild(new Spacer(1));
+						container.addChild(wrapChildLink(row, r));
 					}
 
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
 					if (usageStr) {
 						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
+						container.addChild(new Text(theme.fg("dim", `总计：${usageStr}`), 0, 0));
 					}
 					return container;
 				}
 
-				// Collapsed view (or still running)
-				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
+				// Preserve the original component for legacy results without child references.
+				if (!details.results.some((r) => r.child)) {
+					let text = `${icon} ${theme.fg("toolTitle", theme.bold("并行执行 "))}${theme.fg("accent", status)}`;
+					for (const r of details.results) {
+						const rIcon =
+							r.exitCode === -1
+								? theme.fg("warning", "⏳")
+								: isFailedResult(r)
+									? theme.fg("error", "✗")
+									: theme.fg("success", "✓");
+						const displayItems = getDisplayItems(r.messages);
+						text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
+						if (displayItems.length === 0)
+							text += `\n${theme.fg("muted", r.exitCode === -1 ? "（运行中…）" : "（无输出）")}`;
+						else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					}
+					if (!isRunning) {
+						const usageStr = formatUsageStats(aggregateUsage(details.results));
+						if (usageStr) text += `\n\n${theme.fg("dim", `总计：${usageStr}`)}`;
+					}
+					if (!expanded) text += `\n${theme.fg("muted", "（按 Ctrl+O 展开）")}`;
+					return new Text(text, 0, 0);
+				}
+
+				const container = new Container();
+				container.addChild(new Text(
+					`${icon} ${theme.fg("toolTitle", theme.bold("并行执行 "))}${theme.fg("accent", status)}`,
+					0,
+					0,
+				));
 				for (const r of details.results) {
 					const rIcon =
 						r.exitCode === -1
@@ -1075,21 +1257,33 @@ export default function (pi: ExtensionAPI) {
 								? theme.fg("error", "✗")
 								: theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
-					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0)
-						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
-					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					const transcriptError = transcriptErrors.get(r);
+					const row = new Container();
+					row.addChild(new Text(
+						`${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`,
+						0,
+						0,
+					));
+					if (transcriptError) row.addChild(new Text(theme.fg("error", transcriptError), 0, 0));
+					if (displayItems.length === 0 && !transcriptError) {
+						row.addChild(new Text(theme.fg("muted", r.exitCode === -1 ? "（运行中…）" : "（无输出）"), 0, 0));
+					} else if (displayItems.length > 0) row.addChild(new Text(renderDisplayItems(displayItems, 5), 0, 0));
+					container.addChild(new Spacer(1));
+					container.addChild(wrapChildLink(row, r));
 				}
 				if (!isRunning) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+					if (usageStr) {
+						container.addChild(new Spacer(1));
+						container.addChild(new Text(theme.fg("dim", `总计：${usageStr}`), 0, 0));
+					}
 				}
-				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
-				return new Text(text, 0, 0);
+				if (!expanded) container.addChild(new Text(theme.fg("muted", "（按 Ctrl+O 展开）"), 0, 0));
+				return container;
 			}
 
 			const text = result.content[0];
-			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+			return new Text(text?.type === "text" ? text.text : "（无输出）", 0, 0);
 		},
 	});
 }

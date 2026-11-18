@@ -597,7 +597,7 @@ export async function fetchKimiUsage(apiKey: string): Promise<KeyUsage> {
 
 /** 返回选中项下标；Esc/Ctrl+C 取消返回 undefined。返回下标而非文本，避免重名 label 反查错配 */
 function selectZh(ctx: ExtensionContext, title: string, options: string[]): Promise<number | undefined> {
-	return ctx.ui.custom<number | undefined>((_tui, theme, _keybindings, done) => {
+	return ctx.ui.custom<number | undefined>((_tui, theme, keybindings, done) => {
 		let selectedIndex = 0;
 		const border = () => new DynamicBorder((s: string) => theme.fg("border", s));
 		const container = new Container();
@@ -640,7 +640,7 @@ function selectZh(ctx: ExtensionContext, title: string, options: string[]): Prom
 					updateList();
 				} else if (data === "\r" || data === "\n") {
 					done(selectedIndex);
-				} else if (data === "\x1b" || data === "\x03") {
+				} else if (keybindings.matches(data, "tui.select.cancel")) {
 					done(undefined);
 				}
 			},
@@ -664,7 +664,7 @@ export interface PagerResult {
 }
 
 function pagerZh(ctx: ExtensionContext, pages: PagerPage[], initialPage: number): Promise<PagerResult | undefined> {
-	return ctx.ui.custom<PagerResult | undefined>((_tui, theme, _keybindings, done) => {
+	return ctx.ui.custom<PagerResult | undefined>((_tui, theme, keybindings, done) => {
 		let pageIdx = Math.min(Math.max(0, initialPage), Math.max(0, pages.length - 1));
 		let selIdx = 0;
 		const border = () => new DynamicBorder((s: string) => theme.fg("border", s));
@@ -726,7 +726,7 @@ function pagerZh(ctx: ExtensionContext, pages: PagerPage[], initialPage: number)
 				} else if (data === "\r" || data === "\n") {
 					const opt = p.options[selIdx];
 					if (opt !== undefined) done({ page: pageIdx, index: selIdx, option: opt });
-				} else if (data === "\x1b" || data === "\x03") {
+				} else if (keybindings.matches(data, "tui.select.cancel")) {
 					done(undefined);
 				}
 			},
